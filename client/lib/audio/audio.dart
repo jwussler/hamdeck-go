@@ -28,8 +28,35 @@ abstract class RxPlayer {
   bool get playing;
 }
 
+/// One microphone the operator can choose.
+class MicDevice {
+  const MicDevice(this.id, this.label);
+  final String id;
+  final String label;
+}
+
 abstract class TxCapture {
   Future<void> start(String base, String token);
+
+  /// ⚠️ THE OPERATOR MUST BE ABLE TO CHOOSE THE MICROPHONE, and the C++ client
+  /// always could (/api/tx-audio/devices). Taking whatever the operating system
+  /// calls "default" put 1098 packets of perfect silence on the air with an ON
+  /// AIR bar lit and every counter healthy - the default input on a Windows
+  /// desktop is very often a webcam, a monitor, or nothing at all.
+  Future<List<MicDevice>> devices();
+
+  /// null = the system default. Takes effect at the next start().
+  MicDevice? get device;
+  set device(MicDevice? d);
+
+  /// ⚠️ PROVE THE MICROPHONE WITHOUT TOUCHING THE RADIO. Monitoring opens the
+  /// chosen input locally and meters it: no socket, no transmit routing, no
+  /// carrier. Arming is the only other way to see a level, and arming points the
+  /// radio's modulator at USB - so without this the only way to discover a dead
+  /// microphone was to take the operator's hand mic away first.
+  Future<void> startMonitor();
+  Future<void> stopMonitor();
+  bool get monitoring;
   Future<void> stop();
   bool get running;
 

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_soloud/flutter_soloud.dart';
@@ -147,6 +146,72 @@ class _NativeRx implements RxPlayer {
 /// Transmit audio on Windows, macOS and Linux.
 class _NativeTx implements TxCapture {
   final _rec = AudioRecorder();
+
+  @override
+  MicDevice? device;
+
+  StreamSubscription? _mon;
+
+  @override
+  bool get monitoring => _mon != null;
+
+  @override
+  Future<void> startMonitor() async {
+    if (_mon != null || _ch != null) return;
+    if (!await _rec.hasPermission()) {
+      status = 'the system refused the microphone';
+      return;
+    }
+    final chosen = device;
+    try {
+      // 44100 mono is only a metering rate - nothing here is transmitted, so it
+      // does not have to match the host.
+      final stream = await _rec.startStream(RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 44100,
+        numChannels: 1,
+        device:
+            chosen == null ? null : InputDevice(id: chosen.id, label: chosen.label),
+        echoCancel: false,
+        noiseSuppress: false,
+        autoGain: false,
+      ));
+      status = 'listening to the microphone (nothing is being sent)';
+      _mon = stream.listen((chunk) {
+        final view = ByteData.sublistView(chunk);
+        var peak = 0;
+        for (var i = 0; i + 1 < chunk.lengthInBytes; i += 2) {
+          final a = view.getInt16(i, Endian.little).abs();
+          if (a > peak) peak = a;
+        }
+        level = (peak * 100 / 32767).round();
+      });
+    } catch (e) {
+      status = 'could not open that microphone: $e';
+    }
+  }
+
+  @override
+  Future<void> stopMonitor() async {
+    await _mon?.cancel();
+    _mon = null;
+    if (await _rec.isRecording()) await _rec.stop();
+    level = 0;
+  }
+
+  @override
+  Future<List<MicDevice>> devices() async {
+    try {
+      final list = await _rec.listInputDevices();
+      return [for (final d in list) MicDevice(d.id, d.label)];
+    } catch (e) {
+      // ⚠️ An empty list is a real answer here - a machine can genuinely have no
+      // input - so it must not be confused with a failure to ask.
+      status = 'could not list microphones: $e';
+      return const [];
+    }
+  }
+
   WebSocketChannel? _ch;
   StreamSubscription? _sub;
   StreamSubscription? _mic;
@@ -165,6 +230,10 @@ class _NativeTx implements TxCapture {
   @override
   Future<void> start(String base, String token) async {
     await stop();
+    // ⚠️ The monitor holds the same input device. Leaving it open makes the
+    // transmit capture fail to start on Windows with a device-busy error that
+    // reads like a broken microphone.
+    await stopMonitor();
     // ⚠️ Ask BEFORE opening anything. A denied microphone must be a message, not
     // an armed transmitter with nothing to say.
     if (!await _rec.hasPermission()) {
@@ -206,15 +275,19 @@ class _NativeTx implements TxCapture {
     // tuned for phone calls, they chew a voice bound for an SSB transmitter, and
     // an automatic gain fights the rig's own ALC, which is what actually sets
     // transmit level.
+    final chosen = device;
     final stream = await _rec.startStream(RecordConfig(
       encoder: AudioEncoder.pcm16bits,
       sampleRate: rate,
       numChannels: channels,
+      device: chosen == null ? null : InputDevice(id: chosen.id, label: chosen.label),
       echoCancel: false,
       noiseSuppress: false,
       autoGain: false,
     ));
-    status = 'transmitting audio';
+    status = chosen == null
+        ? 'transmitting from the system default microphone'
+        : 'transmitting from ${chosen.label}';
     _mic = stream.listen((chunk) {
       final view = ByteData.sublistView(chunk);
       var peak = 0;

@@ -20,6 +20,24 @@ import 'audio.dart';
 /// the operator. The AudioContext is CREATED at the host's rate so the browser
 /// does the resampling itself rather than us doing it badly.
 class WebTx implements TxCapture {
+  // The browser does not hand out a device list without a permission prompt and
+  // the web build is a bonus, not the product - the desktop app is where the
+  // operator picks a microphone.
+  @override
+  MicDevice? device;
+
+  @override
+  Future<List<MicDevice>> devices() async => const [];
+
+  @override
+  bool get monitoring => false;
+
+  @override
+  Future<void> startMonitor() async {}
+
+  @override
+  Future<void> stopMonitor() async {}
+
   web.AudioContext? _ctx;
   web.WebSocket? _sock;
   web.MediaStream? _stream;

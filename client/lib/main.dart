@@ -38,6 +38,7 @@ class _PanelState extends State<Panel> {
   Map<String, dynamic>? _rig;
   String? _error;
   Timer? _poll;
+  List<MicDevice> _mics = const [];
   DateTime? _lastGood;
 
   @override
@@ -209,6 +210,117 @@ class _PanelState extends State<Panel> {
         '.${s.substring(s.length - 3)}';
   }
 
+
+  // ⚠️ SILENCE IS A FAULT, AND IT MUST SHOUT. 1098 packets of perfect silence
+  // went to the transmitter with ON AIR lit and every counter healthy, because
+  // "mic 0%" is six quiet characters next to a big red bar. A muted microphone,
+  // a webcam picked as the system default and a working operator all produce
+  // frames at exactly the right rate; the LEVEL is the only thing that tells
+  // them apart, so the level is what gets the loud treatment.
+  Future<void> _loadMics() async {
+    final list = await _tx.devices();
+    if (!mounted) return;
+    setState(() => _mics = list);
+    // Meter the microphone straight away. Nothing is sent and the radio is not
+    // touched - it just means a dead microphone is visible before it matters.
+    if (!_tx.running) await _tx.startMonitor();
+  }
+
+  bool get _sendingSilence =>
+      _tx.running && _tx.packets > 40 && _tx.level == 0;
+
+  Widget _micStatus() {
+    final bad = _sendingSilence || _tx.radioRouting.startsWith('⚠');
+    final String line;
+    if (!_tx.running) {
+      line = 'not armed — the radio keeps its own microphone';
+    } else if (_sendingSilence) {
+      line = '⚠ THE MICROPHONE IS SENDING SILENCE — nothing is going out\n'
+          '${_tx.packets} packets, all of them empty. Check the microphone below.';
+    } else {
+      line = '${_tx.radioRouting}\nmic ${_tx.level}% · ${_tx.packets} packets';
+    }
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      alignment: Alignment.centerLeft,
+      decoration: BoxDecoration(
+          color: _sendingSilence ? T.txRed.withValues(alpha: 0.18) : T.ground,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: bad ? T.txRed : T.line)),
+      child: Text(line,
+          style: TextStyle(
+              fontFamily: T.mono,
+              fontSize: 10,
+              color: bad ? T.txRed : T.dim)),
+    );
+  }
+
+  // ⚠️ The operator picks the microphone, and can see it working BEFORE keying.
+  // Taking whatever the operating system calls "default" is what put silence on
+  // the air: on a Windows desktop the default input is very often a webcam, a
+  // monitor, or nothing at all.
+  Widget _micPicker() => Padding(
+        padding: const EdgeInsets.only(left: 10, right: 10, bottom: 6),
+        child: Row(children: [
+          Text('MIC', style: T.silk()),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: 34,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                  color: T.ground,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: T.line)),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  isExpanded: true,
+                  value: _tx.device?.id ?? '',
+                  dropdownColor: T.panel,
+                  style: const TextStyle(
+                      color: T.text, fontFamily: T.mono, fontSize: 11),
+                  items: [
+                    const DropdownMenuItem(
+                        value: '', child: Text('system default')),
+                    for (final d in _mics)
+                      DropdownMenuItem(value: d.id, child: Text(d.label)),
+                  ],
+                  onChanged: (v) async {
+                    _tx.device = (v == null || v.isEmpty)
+                        ? null
+                        : _mics.firstWhere((d) => d.id == v);
+                    // ⚠️ Restart the capture so the choice takes effect NOW.
+                    // A picker that only applies at the next arm looks broken,
+                    // and the operator finds out mid-over.
+                    if (_tx.running) {
+                      await _tx.stop();
+                      await _tx.start(_api!.base, _api!.token ?? '');
+                    }
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // A live level, so the microphone can be proved before keying.
+          SizedBox(
+            width: 90,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: _tx.level / 100.0,
+                minHeight: 10,
+                backgroundColor: T.ground,
+                valueColor: AlwaysStoppedAnimation(
+                    _sendingSilence ? T.txRed : T.okGreen),
+              ),
+            ),
+          ),
+        ]),
+      );
+
   Widget _panel() {
     final tx = _rig?['tx'] == true;
     return Column(children: [
@@ -273,29 +385,10 @@ class _PanelState extends State<Panel> {
             ),
           ),
           const SizedBox(width: 8),
-          Expanded(
-            child: Container(
-              height: 48,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              alignment: Alignment.centerLeft,
-              decoration: BoxDecoration(
-                  color: T.ground,
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                      color: _tx.radioRouting.startsWith('⚠') ? T.txRed : T.line)),
-              child: Text(
-                _tx.running
-                    ? '${_tx.radioRouting}\nmic ${_tx.level}% · ${_tx.packets} packets'
-                    : 'not armed — the radio keeps its own microphone',
-                style: TextStyle(
-                    fontFamily: T.mono,
-                    fontSize: 10,
-                    color: _tx.radioRouting.startsWith('⚠') ? T.txRed : T.dim),
-              ),
-            ),
-          ),
+          Expanded(child: _micStatus()),
         ]),
       ),
+      _micPicker(),
       Padding(
         padding: const EdgeInsets.all(10),
         child: Row(children: [
