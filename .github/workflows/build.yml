@@ -99,15 +99,27 @@ jobs:
       # real package.
       - name: Windows installer
         if: matrix.target == 'windows'
-        working-directory: client
-        shell: bash
+        working-directory: packaging
+        # ⚠️ pwsh, NOT bash. Under MSYS bash the //D argument trick and the
+        # forward/back slash mixing mangle every path Inno is given, and iscc
+        # fails with an exit code and nothing useful on stdout. The C++ repo
+        # solved this the same way; use its shape rather than rediscovering it.
+        shell: pwsh
         run: |
-          set -eux
-          VER="${GITHUB_REF_NAME#v}"; [ "$VER" = "$GITHUB_REF_NAME" ] && VER=0.0.0
-          iscc //DAppVersion=$VER \
-               //DSourceDir="$(pwd -W)\\build\\windows\\x64\\runner\\Release" \
-               //O"$(pwd -W)" ../packaging/hamdeck-panel.iss
-          ls -l HamDeck-Panel-Windows-Setup.exe
+          $ver = "${{ github.ref_name }}" -replace '^v',''
+          if ($ver -notmatch '^\d+\.\d+\.\d+') { $ver = "0.0.0" }
+          $src = "${{ github.workspace }}\client\build\windows\x64\runner\Release"
+          # ⚠️ CHECK THE PAYLOAD BEFORE PACKAGING IT. Without the two native
+          # audio plugins the panel installs, starts, connects and is silent in
+          # both directions - which is far worse than failing to start, because
+          # it looks like a radio problem.
+          foreach ($f in @("hamdeck_panel.exe","flutter_soloud_plugin.dll","record_windows_plugin.dll")) {
+            if (-not (Test-Path "$src\$f")) { throw "the staged panel has no $f" }
+          }
+          & iscc.exe /Qp "/DAppVersion=$ver" "/DSourceDir=$src" hamdeck-panel.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
+          if (-not (Test-Path "HamDeck-Panel-Windows-Setup.exe")) { throw "iscc produced no installer" }
+          "built HamDeck-Panel-Windows-Setup.exe ($ver)"
 
       - name: macOS disk image
         if: matrix.target == 'macos'
@@ -138,7 +150,7 @@ jobs:
         with:
           name: panel-${{ matrix.target }}
           path: |
-            client/HamDeck-Panel-Windows-Setup.exe
+            packaging/HamDeck-Panel-Windows-Setup.exe
             client/HamDeck-Panel-macOS.dmg
             dist/*.deb
             client/build/${{ matrix.target }}/**/Release/**
