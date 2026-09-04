@@ -79,7 +79,24 @@ def main():
     ap.add_argument("password")
     ap.add_argument("--cpp", default="/home/ubuntu/hamdeck-cpp")
     ap.add_argument("--go", default="/home/ubuntu/hamdeck-go")
+    ap.add_argument("--allow-control", action="store_true",
+                    help="also call the routes that CHANGE the radio. Refused "
+                         "unless the host reports a simulated rig.")
     a = ap.parse_args()
+
+    # ⚠️ THE LOCK IS STRUCTURAL, NOT A WARNING. --allow-control against a host
+    # holding a real serial port is refused here, not left to whoever is typing
+    # at 1 a.m. to remember. It asks the HOST what it is rather than trusting
+    # the address: "localhost" is a real radio for anybody running this on the
+    # station box.
+    if a.allow_control:
+        with urllib.request.urlopen(f"{a.base}/api/health", timeout=6) as r:
+            rig = json.loads(r.read().decode()).get("rig", "")
+        if "simulated" not in rig:
+            print(f"REFUSING --allow-control: this host has {rig!r}, not a simulator.\n"
+                  "Control routes change the operator's station - antenna, filter, AGC,\n"
+                  "which VFO is selected - and a checklist is not worth that.")
+            return 1
 
 
     req = urllib.request.Request(
@@ -103,9 +120,27 @@ def main():
                      if not covered(r) and r not in DELIBERATELY_ABSENT)
 
 
-    # ⚠️ Call only what cannot key a transmitter or move a tuner. This runs
-    # against a simulator, but the same script pointed at the station must not
-    # put a carrier on the air to tick a checkbox.
+    # ⚠️ READ-ONLY BY DEFAULT, AND AGAINST A REAL RADIO THAT IS NOT NEGOTIABLE.
+    #
+    # This used to call everything that could not KEY the transmitter, on the
+    # theory that the rest was harmless. It is not. Run against the live station
+    # on 09/04/2026 it sent preamp on, notch on, monitor on, VFO lock on, split
+    # on, filter to wide, cycled the ANTENNA and the AGC, selected VFO B, and
+    # copied VFO A over VFO B - destroying whatever frequency was stored there.
+    # The operator's panel then showed VFO A's frequency beside VFO B's mode,
+    # which is a readout that disagrees with the radio it is drawn from.
+    #
+    # The C++ project wrote the rule down years ago - never probe a live rig
+    # with a control route - and this file walked straight past it, because
+    # "safe" had been defined as "does not transmit" rather than "does not
+    # change the operator's station".
+    #
+    # So: only the reads below are called unless --allow-control is given, and
+    # --allow-control REFUSES unless the host reports a simulated rig. A scope
+    # lock the operator has to remember is not a lock.
+    READS = ("/get", "/status", "/api/health", "/api/routes", "/api/meters",
+             "/api/backend", "/api/audio", "/api/freq", "/api/freq-b",
+             "/api/power/max", "/api/power/limit")
     UNSAFE = ("/ptt/", "/tune", "/cw/send", "/record", "/api/admin/")
     # ⚠️ Routes that END THE TEST'S OWN SESSION. Calling logout partway through
     # an alphabetical sweep turned 51 working routes into "login required" and
@@ -113,6 +148,7 @@ def main():
     # the thing it is measuring.
     SELF_HARM = ("/api/auth/logout",)
     broken = []
+    skipped = []
     called = 0
     for r in sorted(go):
         # ⚠️ A websocket answers 426 to a plain GET, which is CORRECT. Calling
@@ -121,6 +157,12 @@ def main():
         if r.startswith("/ws"):
             continue
         if any(u in r for u in UNSAFE) or r.endswith("/"):
+            continue
+        # ⚠️ A control route is one that CHANGES THE RADIO, whether or not it
+        # keys it. Skipped unless explicitly allowed against a simulator.
+        is_read = any(r.endswith(k) or r == k for k in READS)
+        if not is_read and not a.allow_control:
+            skipped.append(r)
             continue
         if r in ("/api/auth/login",) or r in SELF_HARM:
             continue
@@ -137,7 +179,8 @@ def main():
         if code != 200 or body.get("status") == "error":
             broken.append((r, code, body.get("message", "")))
 
-    print(f"C++ routes: {len(cpp)}   Go routes: {len(go)}   called: {called}")
+    print(f"C++ routes: {len(cpp)}   Go routes: {len(go)}   called: {called}"
+          + (f"   not called (they change the radio): {len(skipped)}" if skipped else ""))
     if missing:
         print(f"\nNOT PORTED ({len(missing)}):")
         for r in missing:
