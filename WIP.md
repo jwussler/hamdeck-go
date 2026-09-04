@@ -1,64 +1,94 @@
 # HamDeck Go + Flutter — where this stands
 
-Updated 09/04/2026. Read `docs/PORT-FROM-CPP.md` first; it is the checklist this
-was built from.
+Updated 09/04/2026, 6:30 pm. Read `docs/PORT-FROM-CPP.md` first; it is the
+checklist this was built from.
 
 ## Live right now
 
 - **Station host**: VM 105 (`192.168.40.64`), `systemd` unit `hamdeck-go`,
   installed at `/opt/hamdeck-go`, credential in `/etc/hamdeck-go/env` (mode 600),
-  recordings in `/var/lib/hamdeck-go/recordings`. Version **0.2.0**.
-  It is ENABLED, so it comes back after a reboot — the earlier hand-started
-  `/tmp/hgo` did not.
+  recordings in `/var/lib/hamdeck-go/recordings`. Version **0.4.1**.
+  ENABLED, so it comes back after a reboot.
+- **Panel**: served by the host itself at `/` from `/opt/hamdeck-go/panel`.
+  The previous build is kept beside it as `panel.old` — swap the two
+  directories to roll back, no rebuild needed. The 0.4.0 host binary is kept as
+  `bin/hamdeck-host.0.4.0.bak`.
 - **Radio**: `/dev/ttyRIG` at 38400, USB codec in at 22050 Hz / out at 44100 Hz.
-- **Tuner**: TG-XL at `192.168.40.51:9010`.
+- **Tuner**: TG-XL at `192.168.40.51:9010`. **CAT proxy**: 127.0.0.1:4532.
 - **Login**: `admin` / `gotest` on `http://192.168.40.64:5102`. LAN only, no tunnel.
+
+⚠️ **The service unit in `packaging/` IS the one the station runs** — copied to
+`/etc/systemd/system/hamdeck-go.service`, verified byte-identical. They had
+already drifted once: the box had `--cat-proxy-port 4532` and the repo did not,
+so a reinstall from the .deb would have silently removed the CAT proxy.
 
 ## The gates — run these, do not reason about them
 
+    tools/check_auth.py http://192.168.40.64:5102 admin gotest
+        every route needs a session except health and the login pair.
+        The route list comes from the HOST, so a route added tomorrow is
+        checked tomorrow. Safe against the station: every call is made
+        WITHOUT a session, so a working route does nothing and answers 401.
+
     tools/parity.py http://192.168.40.64:5102 admin gotest
-        every C++ route has a Go route, and every Go route answers
+        every C++ route has a Go route. READ-ONLY by default.
 
     tools/check_audio_roundtrip.sh client/build/linux/x64/release/bundle/hamdeck_panel
         receive AND transmit proved by PITCH, not packet counts
 
-    tools/measure_pitch.py <wav> <expected hz>
-        the only check that catches a wrong sample rate
-
     packaging/build-deb.sh <version>
         refuses to package a binary whose --version disagrees with the filename
 
-⚠️ **Run parity against the STATION, not the simulator.** Three real faults
-passed clean on the simulator and failed on the radio: crossed CAT replies, a
-parser that required a semicolon the serial transport strips, and a frequency
-length off by one.
+⚠️ **`tools/parity.py --allow-control` is REFUSED against a real radio** and that
+is structural — it asks `/api/health` what the rig is, not what the address is,
+because "localhost" is a real radio to anybody running it on the station box.
+It earned that on 09/04/2026: run against the live station it sent preamp on,
+notch on, monitor on, VFO lock on, split on, the filter to wide, cycled the
+ANTENNA and the AGC, selected VFO B, and copied VFO A over VFO B — destroying
+the frequency parked there. "Safe" had been defined as "does not key the
+transmitter", which is the wrong line. Never probe a live rig with a control
+route.
 
-## Direction, decided 09/04/2026
+⚠️ **Run everything against the STATION, not the simulator.** Three real faults
+passed clean on the simulator: crossed CAT replies, a parser that required a
+semicolon the serial transport strips, and a frequency length off by one.
 
-⚠️ **No waterfall, and no SCU-LAN10 support.** Joe: *"a lot of times on remote the
-waterfall is a smoke screen - lets make this the best remote solution that we can
-that fills real gaps"*. The SCU-LAN10 protocol work was written, tested and then
-REMOVED rather than parked. Do not reintroduce either without being asked.
+⚠️ **`.last_build_id` is NOT a staleness marker.** A stale panel and a freshly
+rebuilt one carried the *same* id, so comparing it "proved" the station was up
+to date when it was four hours behind. Grep the built `main.dart.js` for a
+string only the new code has — that check can tell working from broken.
 
-The real gaps, from the SCU-LAN10's own manual and from published operator
-complaints:
+## Done 09/04/2026 evening
 
-| gap | status |
-|---|---|
-| no CAT for other software while remote | **DONE** - `--cat-proxy-port 4532` |
-| no digital modes (follows from the above) | reachable now: point WSJT-X at the proxy |
-| not keyboard operable / unusable with a screen reader | **DONE** - every action has a key, TX is announced |
-| link health invisible | **DONE** - round-trip and jitter in the header |
-| Windows-only client | **DONE** - Windows, macOS, Linux |
-| no recording | **DONE** |
-| slow transmit/receive switching | not measured yet |
-| hard to set up from outside the house | not started - LAN only |
+- **The panel the station serves is the panel in git.** It had been four hours
+  behind: keyboard operation, the announcements and the link/jitter pill were
+  committed but never built or deployed. Rebuilt, deployed, and photographed
+  logged in against the live rig (40 m, S9, link 1 ms).
+- **Nothing answers without a session.** Eleven routes were replying 200 to
+  anyone who could reach the port — what hardware the station has, whether
+  transmit was locked down, whether it was recording, the power ceilings, the
+  host flags, and the whole route inventory. Gated at registration; open list is
+  `/api/health` plus login/logout/status. `tools/check_auth.py` is the gate, and
+  it was proved able to FAIL by re-opening `/api/remote/status` and watching it
+  get caught.
+- **Space is documented as what it does** — a toggle, not hold-to-talk. Over a
+  network a lost key-up leaves the carrier up; Escape and the watchdog are the
+  stops.
+- **README and `serial.go`** no longer describe a read-only experiment that
+  never opens a serial port. It runs the station; the C++ host is stopped.
+- **Packages rebuilt at 0.4.1**, the stale 0.2.0 pair deleted. Payload checked:
+  the keyboard work and both audio plugins are inside the panel .deb.
 
 ## What is not done
 
 - Users added through the admin routes live in memory only.
 - Installers are unsigned: SmartScreen warns on Windows, and the DMG needs
-  right-click → Open on macOS.
+  right-click → Open on macOS. **The biggest adoption blocker left.**
 - Receive latency is 371 ms.
-- The C++ host on VM 105 is stopped. Both cannot run: one process holds the
-  serial bridge and the codec.
+- Transmit/receive switching time has never been measured.
+- LAN only — no path in from outside the house.
+- ⚠️ **Left changed on the rig by the parity run and NOT restorable**: VFO B's
+  stored frequency (overwritten with VFO A's), and whatever the antenna, AGC,
+  preamp, notch, monitor and filter width were before they were cycled. VFO A,
+  LSB, split off and lock off were put back with Joe's say-so; the rest he has
+  to eyeball. Check the ANTENNA before transmitting.
