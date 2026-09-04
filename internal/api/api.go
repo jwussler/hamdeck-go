@@ -44,6 +44,9 @@ type Server struct {
 	// socket works with no sound card at all, which is what lets a client's
 	// transmit path be proved on a machine that has no radio attached.
 	TxRec *audio.TxRecorder
+	// The receive recorder, or nil when the host has no audio.
+	Rec *audio.Recorder
+
 	// Settings the host remembers on the panel's behalf; see hostflags.go.
 	Flags *hostFlags
 
@@ -245,13 +248,80 @@ func (s *Server) Handler() http.Handler {
 	// recorder and no per-user profiles yet; a client that asks gets "not
 	// available here" and disables the control, instead of showing an error for
 	// a feature that was never claimed.
-	for _, p := range []string{"/api/record/status"} {
-		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
-			cors(w, r)
+	// ── Recording ────────────────────────────────────────────────────────────
+	//
+	// ⚠️ THE REPLY IS DERIVED FROM WHAT HAPPENED, NOT FROM THE ROUTE EXISTING.
+	// The reference implementation answered {"status":"ok","recording":true}
+	// from start while its recorder had failed to open the file. Here every
+	// answer comes from the recorder's own state after the attempt.
+	recStatus := func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if s.Rec == nil {
 			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
-				"message": "not available on this host"})
-		})
+				"recording": false,
+				"message":   "this host has no receive audio, so nothing to record"})
+			return
+		}
+		out := s.Rec.Status()
+		out["status"] = "ok"
+		writeJSON(w, 200, out)
 	}
+	mux.HandleFunc("/api/record/status", recStatus)
+
+	recAct := func(action string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			cors(w, r)
+			if !s.authed(r) {
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			if s.Rec == nil {
+				writeJSON(w, 503, map[string]any{"status": "error", "available": false,
+					"message": "this host has no receive audio, so nothing to record"})
+				return
+			}
+			var name string
+			var err error
+			did := action
+			switch action {
+			case "start":
+				name, err = s.Rec.Start()
+			case "stop":
+				name, err = s.Rec.Stop()
+			case "replay":
+				name, err = s.Rec.Replay()
+			case "toggle":
+				if s.Rec.Recording() {
+					did, name, err = "stop", "", nil
+					name, err = s.Rec.Stop()
+				} else {
+					did = "start"
+					name, err = s.Rec.Start()
+				}
+			}
+			out := s.Rec.Status()
+			out["action"] = did
+			if name != "" {
+				out["filename"] = name
+			}
+			if err != nil {
+				out["status"] = "error"
+				out["message"] = err.Error()
+				writeJSON(w, 409, out)
+				return
+			}
+			out["status"] = "ok"
+			writeJSON(w, 200, out)
+		}
+	}
+	mux.HandleFunc("/api/record/start", recAct("start"))
+	mux.HandleFunc("/api/record/stop", recAct("stop"))
+	mux.HandleFunc("/api/record/toggle", recAct("toggle"))
+	// ⚠️ The receive audio is MONO. The reference has a stereo variant for a
+	// two-receiver capture this host does not do, so it is the SAME call rather
+	// than a silent pretence at a second channel.
+	mux.HandleFunc("/api/record/toggle/stereo", recAct("toggle"))
+	mux.HandleFunc("/api/record/replay", recAct("replay"))
 
 	mux.HandleFunc("/api/remote-tx/on", func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)

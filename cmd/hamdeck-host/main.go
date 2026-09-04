@@ -45,6 +45,9 @@ func main() {
 	pttTimeout := flag.Duration("ptt-timeout", 180*time.Second, "the transmit watchdog: the host unkeys the rig after this long, whatever the client is doing")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
+	recDir := flag.String("record-dir", "", "directory for receive recordings. Empty = recording off")
+	replaySecs := flag.Int("replay-seconds", 60, "how much receive audio to keep for /api/record/replay")
+	recMaxSecs := flag.Int("record-max-seconds", 10800, "stop a recording after this long rather than filling the disk")
 	txRecord := flag.String("tx-record", "", "TEST INSTRUMENT: write the audio clients transmit to this WAV file, with or without a sound card")
 	txRate := flag.Int("tx-rate", 44100, "the rate the host asks clients to transmit at when --tx-record is used with no sound card. Deliberately unlike the receive rate: a client that reuses the receive rate is the bug this catches")
 	tgxlHost := flag.String("tgxl", "", "antenna tuner host, e.g. 192.168.40.51. Empty = no tuner")
@@ -184,6 +187,22 @@ func main() {
 		}
 	}
 
+	// ⚠️ The recorder is fed from the SAME fan-out the listeners are, so a
+	// recording is exactly what a listener heard rather than a second capture
+	// that could differ.
+	var recorder *audio.Recorder
+	if *recDir != "" && stream != nil {
+		recorder = audio.NewRecorder(*recDir, stream.Rate, stream.Channels,
+			*replaySecs, *recMaxSecs)
+		if ok, why := recorder.Available(); !ok {
+			log.Fatalf("FATAL: --record-dir: %s", why)
+		}
+		stream.Record(recorder)
+		log.Printf("recording: to %s, %ds replay buffer", *recDir, *replaySecs)
+	} else if *recDir != "" {
+		log.Printf("recording: IGNORED - there is no receive audio to record")
+	}
+
 	// ⚠️ THE TUNER DRIVES THE RADIO, not just the tuner: it drops to 15 W, goes
 	// to CW, keys, tunes and puts everything back. It gets the rig for that
 	// reason, and nothing else in this program hands the rig to anything.
@@ -214,14 +233,14 @@ func main() {
 	ctrl := &http.Server{
 		Addr: fmt.Sprintf("127.0.0.1:%d", *control),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
-			Audio: stream, Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rig2: asRig2(r)}).Handler(),
+			Audio: stream, Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rec: recorder, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
 		Addr: fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
 			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream,
-			Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rig2: asRig2(r)}).Handler(),
+			Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rec: recorder, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

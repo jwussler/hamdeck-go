@@ -30,6 +30,7 @@ type Stream struct {
 	peakAt  time.Time
 	running bool
 	desc    string
+	rec     *Recorder
 }
 
 type client struct {
@@ -223,6 +224,15 @@ func (s *Stream) readLoop(d *alsa.Device, chunkBytes int) {
 // tone come through here, so the tone exercises the same metering, the same
 // queue and the same drop rule the radio does - a test source on its own path
 // would prove that path works and nothing else.
+// Record attaches a recorder to this stream. ⚠️ It is fed from publish(), the
+// same place clients are, so a recording is exactly what a listener heard - not
+// a second capture that could differ.
+func (s *Stream) Record(r *Recorder) {
+	s.mu.Lock()
+	s.rec = r
+	s.mu.Unlock()
+}
+
 func (s *Stream) publish(buf []byte) {
 	peak := 0
 	for i := 0; i+1 < len(buf); i += 2 {
@@ -236,6 +246,16 @@ func (s *Stream) publish(buf []byte) {
 	}
 	out := make([]byte, len(buf))
 	copy(out, buf)
+
+	s.mu.RLock()
+	rec := s.rec
+	s.mu.RUnlock()
+	if rec != nil {
+		// Outside the stream lock: the recorder writes to disk, and holding the
+		// capture lock across a disk write is how a slow filesystem turns into
+		// gaps in everybody's audio.
+		rec.Feed(out)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
