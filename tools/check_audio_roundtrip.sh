@@ -25,13 +25,25 @@ PORT=5902
 DISP=":81"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
-trap 'kill %1 %2 2>/dev/null || true; rm -rf "$tmp"' EXIT
+cleanup() {
+    pkill -x hamdeck-host 2>/dev/null || true
+    pkill -x "$(basename "$CLIENT")" 2>/dev/null || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
 
 command -v parecord >/dev/null || { echo "needs pulseaudio-utils"; exit 1; }
 command -v xdotool  >/dev/null || { echo "needs xdotool"; exit 1; }
 
 echo "== a virtual sound card: a speaker we can record, a mic that plays $MIC_HZ Hz"
 pulseaudio --check || pulseaudio --start --exit-idle-time=-1
+# ⚠️ Unload first. Loading these twice leaves two sinks named hdspk and one
+# fake microphone feeding the sink nobody is recording, which reads as "the
+# client transmitted silence" - a pass turning into a false failure on the
+# second run of the day.
+for m in $(pactl list short modules | grep -E "hdspk|hdmic|module-sine" | cut -f1); do
+    pactl unload-module "$m" 2>/dev/null || true
+done
 pactl load-module module-null-sink sink_name=hdspk >/dev/null
 pactl load-module module-null-sink sink_name=hdmic >/dev/null
 pactl load-module module-sine sink=hdmic frequency=$MIC_HZ >/dev/null
@@ -44,6 +56,7 @@ timeout 3 parecord --device=hdmic.monitor --format=s16le --rate=44100 --channels
 python3 "$here/tools/measure_pitch.py" "$tmp/mic.wav" $MIC_HZ 5
 
 echo "== host: streams $RX_HZ Hz, asks for transmit at $TX_RATE Hz"
+[ -x "$here/hamdeck-host" ] || (cd "$here" && go build ./cmd/hamdeck-host)
 HASH=$(echo "roundtrip" | "$here/hamdeck-host" --hash-password | sed 's/^HAMDECK_ADMIN_HASH=//')
 HAMDECK_ADMIN_HASH="$HASH" "$here/hamdeck-host" --radio "" \
     --audio "tone:$RX_HZ" --tx-record "$tmp/tx.wav" --tx-rate $TX_RATE \
