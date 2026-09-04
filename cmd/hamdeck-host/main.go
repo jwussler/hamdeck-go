@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jwussler/hamdeck-go/internal/api"
+	"github.com/jwussler/hamdeck-go/internal/audio"
 	"github.com/jwussler/hamdeck-go/internal/auth"
 	"github.com/jwussler/hamdeck-go/internal/rig"
 )
@@ -37,6 +38,8 @@ func main() {
 	panel2 := flag.String("panel-alt", "", "a second panel, served at /alt/ - for comparing two clients side by side")
 	hashPw := flag.Bool("hash-password", false, "read a password on stdin and print its hash")
 	showVer := flag.Bool("version", false, "print the version and exit")
+	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
+	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
 	flag.Parse()
 
 	if *showVer {
@@ -54,6 +57,41 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("HAMDECK_ADMIN_HASH=%s\n", auth.Hash(pw))
+		return
+	}
+
+	// ⚠️ THE RISKY PART, PROVEN BEFORE ANYTHING IS BUILT ON IT. Whether pure-Go
+	// ALSA can actually read this station's codec decides the whole audio design,
+	// and it is a ten minute answer rather than a discovery made after a
+	// streaming path exists.
+	if *audioList {
+		devs, err := audio.List()
+		if err != nil {
+			log.Fatalf("cannot list sound devices: %v", err)
+		}
+		for _, d := range devs {
+			fmt.Println("  " + d)
+		}
+		return
+	}
+	if *audioProbe != "" {
+		desc, peak, err := audio.Probe(*audioProbe, 3*time.Second)
+		if desc != "" {
+			fmt.Println("device:", desc)
+		}
+		if err != nil {
+			log.Fatalf("probe failed: %v", err)
+		}
+		pct := peak * 100 / 32767
+		fmt.Printf("peak: %d/32767 (%d%%)\n", peak, pct)
+		// ⚠️ Zero is a RESULT, not a pass. A capture that runs and returns
+		// silence looks identical to one carrying the band, which is the trap
+		// this whole project keeps re-learning.
+		if peak == 0 {
+			fmt.Println("SILENCE - the device opened and read frames, and every one of them was zero.")
+			os.Exit(1)
+		}
+		fmt.Println("AUDIO IS ARRIVING")
 		return
 	}
 
