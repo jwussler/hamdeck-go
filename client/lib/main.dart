@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'api.dart';
-import 'rx_audio.dart';
+import 'audio/audio.dart';
 import 'theme.dart';
 
 void main() => runApp(const HamDeckApp());
@@ -31,7 +31,10 @@ class _PanelState extends State<Panel> {
   final _pass = TextEditingController();
 
   Api? _api;
-  final _rx = RxAudio();
+  // ⚠️ The platform implementation is chosen at COMPILE time - a desktop
+  // build never sees Web Audio, and a web build never sees dart:io.
+  final _rx = makeRxPlayer();
+  final _tx = makeTxCapture();
   Map<String, dynamic>? _rig;
   String? _error;
   Timer? _poll;
@@ -41,6 +44,7 @@ class _PanelState extends State<Panel> {
   void dispose() {
     _poll?.cancel();
     _rx.stop();
+    _tx.stop();
     super.dispose();
   }
 
@@ -99,6 +103,8 @@ class _PanelState extends State<Panel> {
       final s = await _api!.status();
       if (!mounted) return;
       setState(() {
+        // the audio meters are updated by their own callbacks; this repaint is
+        // what makes them visible
         if (s != null) {
           _rig = s;
           _lastGood = DateTime.now();
@@ -237,6 +243,59 @@ class _PanelState extends State<Panel> {
       _keys('MODE', const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'],
           (m) => '/api/mode/$m', selected: '${_rig?['mode']}'),
       const Spacer(),
+      // ⚠️ ARM AND PTT ARE SEPARATE, and that is not a UI preference. Arming
+      // claims the audio path and points the RADIO at it; PTT keys the
+      // transmitter. Rolling them into one control means connecting can land you
+      // at the start of an over.
+      Padding(
+        padding: const EdgeInsets.only(left: 10, right: 10, bottom: 4),
+        child: Row(children: [
+          SizedBox(
+            width: 110,
+            height: 48,
+            child: FilledButton(
+              style: FilledButton.styleFrom(
+                  backgroundColor: _tx.running ? T.cyanFill : T.panel,
+                  foregroundColor: _tx.running ? T.cyan : T.text,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
+                      side: BorderSide(color: _tx.running ? T.cyan : T.line))),
+              onPressed: () async {
+                if (_tx.running) {
+                  await _tx.stop();
+                } else {
+                  await _tx.start(_api!.base, _api!.token ?? '');
+                }
+                if (mounted) setState(() {});
+              },
+              child: Text(_tx.running ? 'ARMED' : 'ARM',
+                  style: const TextStyle(letterSpacing: 1.4)),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              alignment: Alignment.centerLeft,
+              decoration: BoxDecoration(
+                  color: T.ground,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                      color: _tx.radioRouting.startsWith('⚠') ? T.txRed : T.line)),
+              child: Text(
+                _tx.running
+                    ? '${_tx.radioRouting}\nmic ${_tx.level}% · ${_tx.packets} packets'
+                    : 'not armed — the radio keeps its own microphone',
+                style: TextStyle(
+                    fontFamily: T.mono,
+                    fontSize: 10,
+                    color: _tx.radioRouting.startsWith('⚠') ? T.txRed : T.dim),
+              ),
+            ),
+          ),
+        ]),
+      ),
       Padding(
         padding: const EdgeInsets.all(10),
         child: Row(children: [

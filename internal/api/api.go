@@ -123,6 +123,119 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, s.Rig.Snapshot())
 	})
 
+	// ── The rest of the C++ host's surface ──────────────────────────────────
+	//
+	// ⚠️ THE QT CLIENT CALLS NINETEEN ROUTES AND TWO SOCKETS, and it fails in
+	// different ways for each missing one - a 404 on /api/meters is a dead
+	// S-meter, a 404 on /api/status/full is every receiver toggle stuck off. The
+	// point of matching this surface is that the EXISTING signed, packaged apps
+	// on Windows, macOS, Linux and iOS connect to this host with nothing
+	// rebuilt. Where this host genuinely cannot do a thing yet, it answers
+	// honestly rather than 404ing: a client that gets "available: false" shows a
+	// disabled control, and one that gets a 404 shows an error.
+	mux.HandleFunc("/api/meters", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		snap := s.Rig.Snapshot()
+		writeJSON(w, 200, map[string]any{
+			"status": "ok", "s_meter": snap.SMeterRaw, "swr": snap.SWRRaw,
+			"alc": snap.ALCRaw, "power": 0,
+			// ⚠️ The derived values carry their unit IN THE NAME, so no client can
+			// mistake a percentage for watts - the C++ host's rule, kept.
+			"alc_pct": snap.ALCRaw * 100 / 64, "power_pct": 0,
+			"swr_ratio": 1.0, "s_meter_db": 0, "s_unit": "",
+		})
+	})
+
+	mux.HandleFunc("/api/meters/scale", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		// ⚠️ NO CALIBRATION IS SHIPPED, AND THAT IS SAID OUT LOUD. The C++ host
+		// carries hamlib's table and states in the payload that it was not
+		// measured on this station; inventing one here would put invented S-units
+		// on a report an operator passes to another human. An empty tick list
+		// makes the client draw an UNLABELLED scale, which is the honest picture.
+		writeJSON(w, 200, map[string]any{
+			"status": "ok", "raw_max": 255, "s9_raw": 160,
+			"source":      "not calibrated on this host - the meter face is unlabelled on purpose",
+			"calibration": []any{}, "ticks": []any{},
+		})
+	})
+
+	mux.HandleFunc("/api/status/full", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		snap := s.Rig.Snapshot()
+		// ⚠️ Only what this host actually reads. Every field here is polled from
+		// the radio or absent; none is a plausible default. A receiver toggle
+		// that reports "off" because nobody asked the rig is a confident wrong
+		// answer about the operator's own station.
+		writeJSON(w, 200, map[string]any{
+			"freq_b": snap.FreqB, "agc": "", "ant": 0,
+		})
+	})
+
+	mux.HandleFunc("/api/backend", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		out := map[string]any{"status": "ok", "cat": s.Rig.Describe(), "simulated": false}
+		if s.Audio != nil {
+			out["rx_audio"] = s.Audio.Describe()
+			out["rx_peak"] = s.Audio.Peak()
+		}
+		if s.Tx != nil {
+			written, dropped := s.Tx.Stats()
+			out["tx_audio"] = s.Tx.Describe()
+			out["tx_peak"] = s.Tx.Peak()
+			out["tx_accepted"] = written
+			out["tx_dropped"] = dropped
+		}
+		writeJSON(w, 200, out)
+	})
+
+	// ⚠️ ANSWERED HONESTLY RATHER THAN 404ed. This host has no amplifier, no
+	// recorder and no per-user profiles yet; a client that asks gets "not
+	// available here" and disables the control, instead of showing an error for
+	// a feature that was never claimed.
+	for _, p := range []string{"/api/tune/tgxl/status", "/api/record/status"} {
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			cors(w, r)
+			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
+				"message": "not available on this host"})
+		})
+	}
+
+	mux.HandleFunc("/api/remote-tx/on", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) || s.Rig2 == nil {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		if err := s.Rig2.SetRemoteTX(true); err != nil {
+			writeJSON(w, 500, map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		rear, usb, err := s.Rig2.RemoteTXState()
+		// ⚠️ verified is what the RADIO said, and unverified is not the same as
+		// failed. The C++ host learned that reporting a plausible value here
+		// sends the hunt for a dead transmitter to the wrong end of the chain.
+		writeJSON(w, 200, map[string]any{"status": "ok", "remote_tx": rear && usb,
+			"verified": err == nil, "mod_source_rear": rear, "rear_select_usb": usb,
+			"message": "SSB MOD SOURCE=REAR, REAR SELECT=USB"})
+	})
+
 	// ── Control. Every one of these CHANGES THE RADIO. ──────────────────────
 	set := func(path string, fn func(string) error) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +364,36 @@ func (s *Server) Handler() http.Handler {
 					s.Tx.Write(data)
 				}
 			}
+		})
+
+		// ⚠️ WHAT THE RADIO IS ROUTED TO, ASKED OF THE RADIO. Without this an
+		// operator cannot tell why a keyed transmitter is putting out nothing -
+		// and "the commands were sent" is not an answer, because MOD SOURCE
+		// silently reverting to MIC is the single most expensive failure this
+		// project has had. It is also how you find out your hand mic is dead
+		// because a remote client left the rig on REAR.
+		mux.HandleFunc("/api/remote-tx/status", func(w http.ResponseWriter, r *http.Request) {
+			cors(w, r)
+			if !s.authed(r) {
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			if s.Rig2 == nil {
+				writeJSON(w, 200, map[string]any{"status": "ok", "supported": false})
+				return
+			}
+			rear, usb, err := s.Rig2.RemoteTXState()
+			if err != nil {
+				// ⚠️ Unverified is NOT the same as false. Saying "MIC" when the
+				// read failed would be a confident wrong answer about a
+				// transmitter.
+				writeJSON(w, 200, map[string]any{"status": "ok", "verified": false,
+					"message": "the radio did not answer: " + err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"status": "ok", "verified": true,
+				"mod_source_rear": rear, "rear_select_usb": usb,
+				"hand_mic_live": !rear})
 		})
 
 		// What the audio path is actually doing, as numbers a person can read.

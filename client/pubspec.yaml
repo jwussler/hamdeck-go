@@ -36,6 +36,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.6.0
   web: ^1.1.1
+  record: ^7.1.1
+  web_socket_channel: ^3.0.3
+  flutter_soloud: ^5.0.0
 
 dev_dependencies:
   flutter_test:
@@ -89,3 +92,15 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+# ⚠️ NO CODEC LIBRARIES. SoLoud links FLAC, Ogg, Opus and Vorbis by default, and
+# the Linux build then needs libFLAC.so.14 present on the machine at RUN time -
+# a version Ubuntu 24.04 does not ship. The panel loaded, talked to the radio and
+# reported "no audio output on this machine" while everything else worked.
+# We stream raw 16-bit PCM and decode nothing, so none of those libraries are
+# used; dropping them removes the dependency instead of shipping four .so files
+# to satisfy code we never call.
+hooks:
+  user_defines:
+    flutter_soloud:
+      no_xiph_libs: true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +95,59 @@ func (s *Stream) Start(match string) error {
 	return lastErr
 }
 
+// StartTone streams a generated sine instead of a sound card.
+//
+// ⚠️ THIS EXISTS TO CATCH A WRONG SAMPLE RATE, which is invisible to every other
+// check. A client that plays a 22050 Hz stream at 44100 counts every packet,
+// meters a healthy level and draws a perfect bar - it just plays everything an
+// octave high, and nobody notices until a voice sounds wrong on the air. Point a
+// client at a known frequency, record what comes out of its speaker and measure
+// the pitch: that is the only test that can tell those two apart.
+//
+// It is deliberately NOT reachable from the radio's own flags by accident - the
+// operator has to ask for "tone:<hz>" by name, because a station streaming a
+// test tone while someone waits to hear the band is its own kind of failure.
+func (s *Stream) StartTone(hz int) error {
+	if hz <= 0 || hz*2 >= s.Rate {
+		// Above Nyquist the tone aliases DOWN to some other frequency and the
+		// gate would measure a number that has nothing to do with what it asked
+		// for - and pass or fail for the wrong reason.
+		return fmt.Errorf("a %d Hz tone cannot be represented at %d Hz sampling", hz, s.Rate)
+	}
+	s.mu.Lock()
+	s.running = true
+	s.desc = fmt.Sprintf("TEST TONE %d Hz @ %d Hz %dch S16_LE - not the radio",
+		hz, s.Rate, s.Channels)
+	rate, channels := s.Rate, s.Channels
+	s.mu.Unlock()
+
+	go func() {
+		const chunkMs = 40
+		frames := rate * chunkMs / 1000
+		buf := make([]byte, frames*channels*2)
+		phase := 0.0
+		step := 2 * math.Pi * float64(hz) / float64(rate)
+		tick := time.NewTicker(chunkMs * time.Millisecond)
+		defer tick.Stop()
+		for range tick.C {
+			for f := 0; f < frames; f++ {
+				v := int16(12000 * math.Sin(phase))
+				phase += step
+				if phase > 2*math.Pi {
+					phase -= 2 * math.Pi
+				}
+				for c := 0; c < channels; c++ {
+					i := (f*channels + c) * 2
+					buf[i] = byte(uint16(v))
+					buf[i+1] = byte(uint16(v) >> 8)
+				}
+			}
+			s.publish(buf)
+		}
+	}()
+	return nil
+}
+
 // tryOpen opens the device fresh for every attempt. ⚠️ A device that has failed a
 // read is in an unknown state, and reusing it makes the next attempt's result
 // meaningless.
@@ -161,35 +215,43 @@ func (s *Stream) readLoop(d *alsa.Device, chunkBytes int) {
 			s.mu.Unlock()
 			return
 		}
-		peak := 0
-		for i := 0; i+1 < len(buf); i += 2 {
-			v := int(int16(uint16(buf[i]) | uint16(buf[i+1])<<8))
-			if v < 0 {
-				v = -v
-			}
-			if v > peak {
-				peak = v
-			}
-		}
-		out := make([]byte, len(buf))
-		copy(out, buf)
+		s.publish(buf)
+	}
+}
 
-		s.mu.Lock()
-		if s.peakAt.IsZero() || time.Since(s.peakAt) > 1500*time.Millisecond {
-			s.peak, s.peakAt = peak, time.Now()
-		} else if peak > s.peak {
-			s.peak = peak
+// publish meters one chunk and fans it out. Both the sound card and the test
+// tone come through here, so the tone exercises the same metering, the same
+// queue and the same drop rule the radio does - a test source on its own path
+// would prove that path works and nothing else.
+func (s *Stream) publish(buf []byte) {
+	peak := 0
+	for i := 0; i+1 < len(buf); i += 2 {
+		v := int(int16(uint16(buf[i]) | uint16(buf[i+1])<<8))
+		if v < 0 {
+			v = -v
 		}
-		for c := range s.clients {
-			select {
-			case c.ch <- out:
-			default:
-				// ⚠️ Drop for THIS client only. Blocking here would stall the
-				// capture and every listener would hear the gap.
-				c.dropped++
-			}
+		if v > peak {
+			peak = v
 		}
-		s.mu.Unlock()
+	}
+	out := make([]byte, len(buf))
+	copy(out, buf)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.peakAt.IsZero() || time.Since(s.peakAt) > 1500*time.Millisecond {
+		s.peak, s.peakAt = peak, time.Now()
+	} else if peak > s.peak {
+		s.peak = peak
+	}
+	for c := range s.clients {
+		select {
+		case c.ch <- out:
+		default:
+			// ⚠️ Drop for THIS client only. Blocking here would stall the
+			// capture and every listener would hear the gap.
+			c.dropped++
+		}
 	}
 }
 
@@ -209,7 +271,13 @@ func (s *Stream) Serve(ctx context.Context, conn *websocket.Conn) {
 	// ⚠️ THE FORMAT IS SENT FIRST, AS TEXT, so the client never has to assume a
 	// rate. A player that guesses 48000 for a 22050 stream sounds like a
 	// chipmunk and looks like a radio problem.
-	hello := fmt.Sprintf(`{"rate":%d,"channels":%d,"format":"s16le"}`, rate, ch)
+	// ⚠️ THE C++ HOST'S EXACT CONFIG FRAME, FIELD FOR FIELD. The Qt client parses
+	// type/sample_rate/channels/bits_per_sample and ignores anything else; a
+	// frame shaped {"rate":...} is silently not a config, so the client waits
+	// forever for a format and plays nothing - which presents as a dead
+	// receiver, not as a protocol mismatch.
+	hello := fmt.Sprintf(
+		`{"type":"config","sample_rate":%d,"channels":%d,"bits_per_sample":16}`, rate, ch)
 	if err := conn.Write(ctx, websocket.MessageText, []byte(hello)); err != nil {
 		return
 	}
@@ -241,11 +309,11 @@ func (s *Stream) Clients() int {
 
 // TxSink plays PCM from a client into the radio's codec.
 type TxSink struct {
-	mu      sync.Mutex
-	dev     *alsa.Device
-	rate    int
+	mu       sync.Mutex
+	dev      *alsa.Device
+	rate     int
 	channels int
-	desc    string
+	desc     string
 
 	peak   int
 	peakAt time.Time

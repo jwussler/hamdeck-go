@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:web/web.dart' as web;
 
+import 'audio.dart';
+
 /// Playing the receiver in a browser.
 ///
 /// ⚠️ SCHEDULED, NOT FIRED-AND-FORGOTTEN. Each packet is turned into an
@@ -15,7 +17,7 @@ import 'package:web/web.dart' as web;
 /// ⚠️ AND THE FORMAT COMES FROM THE HOST, never assumed. The first message on
 /// the socket is JSON naming the rate; a player that guesses 48000 for a 22050
 /// stream sounds like a chipmunk and looks like a fault at the radio.
-class RxAudio {
+class WebRx implements RxPlayer {
   web.AudioContext? _ctx;
   web.WebSocket? _sock;
   double _playhead = 0;
@@ -26,14 +28,19 @@ class RxAudio {
   /// This is the client's own measurement - not the host's - so the two can
   /// disagree, and a disagreement is the interesting case: it means the audio
   /// left the radio and did not reach the operator.
+  @override
   int level = 0;
   DateTime _levelAt = DateTime.fromMillisecondsSinceEpoch(0);
+  @override
   int packets = 0;
+  @override
   String status = 'not started';
 
+  @override
   bool get playing => _sock != null && status == 'playing';
 
-  void start(String base, String token) {
+  @override
+  Future<void> start(String base, String token) async {
     stop();
     final wsBase = base.replaceFirst('http', 'ws');
     // ⚠️ The token is a query parameter because a browser cannot set headers on
@@ -117,7 +124,8 @@ class RxAudio {
     }
   }
 
-  void stop() {
+  @override
+  Future<void> stop() async {
     _sock?.close();
     _sock = null;
     _ctx?.close();

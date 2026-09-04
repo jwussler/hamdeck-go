@@ -17,6 +17,15 @@ import (
 
 // Snapshot is what the panel draws. Everything the operator sees comes from here
 // and nothing is inferred by the client.
+//
+// ⚠️ THE FIELD NAMES ARE THE C++ HOST'S, EXACTLY, AND THAT IS THE WHOLE POINT.
+// The Qt client already exists on Windows, macOS, Linux and iOS - signed,
+// packaged, with working audio, PTT and a transmit watchdog - and it speaks a
+// fixed set of 19 routes and two sockets. Matching that surface means those apps
+// connect to THIS host with nothing to rebuild, which is a better answer to
+// "we need real desktop apps" than writing new ones.
+//
+// So a field renamed here is a client broken there. This struct is a contract.
 type Snapshot struct {
 	Connected bool   `json:"connected"`
 	Freq      int64  `json:"freq"`
@@ -27,6 +36,14 @@ type Snapshot struct {
 	SMeterRaw int    `json:"s_meter"`
 	SWRRaw    int    `json:"swr"`
 	ALCRaw    int    `json:"alc"`
+	FreqB     int64  `json:"freq_b"`
+	Split     bool   `json:"split"`
+	TxTimeout int    `json:"tx_timeout_in"`
+	FreqBuf   string `json:"freq_buffer"`
+	VFOLocked bool   `json:"vfo_locked"`
+	Diversity bool   `json:"diversity"`
+	AmpTuning bool   `json:"amp_tuning"`
+	TgxlTune  bool   `json:"tgxl_tuning"`
 	// ⚠️ How old this reading is. The C++ host learned the hard way that a stale
 	// cache looks exactly like a live one; the age travels WITH the data so a
 	// client cannot forget to ask.

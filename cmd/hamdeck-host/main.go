@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,7 +44,7 @@ func main() {
 	pttTimeout := flag.Duration("ptt-timeout", 180*time.Second, "the transmit watchdog: the host unkeys the rig after this long, whatever the client is doing")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
-	audioDev := flag.String("audio", "", "capture device to stream from, matched by card name (e.g. codec). Empty = no audio")
+	audioDev := flag.String("audio", "", "capture device to stream from, matched by card name (e.g. codec). `tone:<hz>` streams a test tone instead of the radio. Empty = no audio")
 	flag.Parse()
 
 	if *showVer {
@@ -140,18 +141,37 @@ func main() {
 	// never make a sound.
 	var stream *audio.Stream
 	var txSink *audio.TxSink
+	tone := false
 	if *audioDev != "" {
 		stream = audio.NewStream()
-		if err := stream.Start(*audioDev); err != nil {
+		// ⚠️ A test tone is announced loudly and takes no sound card. It is how a
+		// client's playback is proved end to end - see Stream.StartTone - and it
+		// must never be mistaken for the band.
+		if hz, ok := strings.CutPrefix(*audioDev, "tone:"); ok {
+			n, err := strconv.Atoi(hz)
+			if err != nil {
+				log.Fatalf("FATAL: audio: %q is not a frequency in Hz", hz)
+			}
+			if err := stream.StartTone(n); err != nil {
+				log.Fatalf("FATAL: audio: %v", err)
+			}
+			log.Printf("audio in:  %s", stream.Describe())
+			log.Printf("⚠️  THIS HOST IS STREAMING A TEST TONE, NOT THE RADIO.")
+			tone = true
+		} else if err := stream.Start(*audioDev); err != nil {
 			log.Fatalf("FATAL: audio: %v", err)
+		} else {
+			log.Printf("audio in:  %s", stream.Describe())
 		}
-		log.Printf("audio in:  %s", stream.Describe())
 
 		// ⚠️ The transmit side is opened at startup too, and its failure is
 		// reported rather than discovered mid-over by an operator whose voice
 		// went nowhere.
 		txSink = audio.NewTxSink()
-		if err := txSink.Open(*audioDev); err != nil {
+		if tone {
+			// Nothing to transmit into: a tone host has no sound card at all.
+			txSink = nil
+		} else if err := txSink.Open(*audioDev); err != nil {
 			log.Printf("audio out: UNAVAILABLE - %v (receive still works; transmit will refuse)", err)
 			txSink = nil
 		} else {
@@ -160,13 +180,13 @@ func main() {
 	}
 
 	ctrl := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", *control),
+		Addr: fmt.Sprintf("127.0.0.1:%d", *control),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
 			Audio: stream, Tx: txSink, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
-		Addr:              fmt.Sprintf(":%d", *dash),
+		Addr: fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
 			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream,
 			Tx: txSink, Rig2: asRig2(r)}).Handler(),
@@ -187,7 +207,6 @@ func main() {
 		log.Fatalf("dashboard listener: %v", err)
 	}
 }
-
 
 // asRig2 exposes the transmit-routing methods only when the rig actually has
 // them. ⚠️ The simulator does not, and giving it a fake that returns success
