@@ -1,0 +1,84 @@
+name: build
+
+# ⚠️ THE ONLY PLACE THE WINDOWS AND macOS PANELS CAN BE BUILT. There is no Mac and
+# no Windows box in this project's development loop, so a desktop change that has
+# not run here has not been built at all - and "it compiles on Linux" has already
+# been shown tonight to mean nothing: the browser fix crashed the Linux desktop
+# app on its first frame while every build was green.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The server. Fast, and it gates everything else.
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23', cache: true }
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: go build -ldflags "-X main.version=${GITHUB_REF_NAME#v}" ./cmd/hamdeck-host
+      # ⚠️ RUN IT, not just build it. A host that compiles and exits on start is a
+      # green build and a dead service.
+      - name: It actually starts and serves
+        run: |
+          set -eux
+          HASH=$(echo "ci-only-password" | ./hamdeck-host --hash-password)
+          HAMDECK_ADMIN_HASH="${HASH#HAMDECK_ADMIN_HASH=}" ./hamdeck-host --port 5199 &
+          sleep 2
+          curl -fsS http://127.0.0.1:5199/api/health | tee /dev/stderr | grep -q '"status":"ok"'
+          # ⚠️ And that the boundary HOLDS: status without a session must be 401.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5199/api/status)
+          [ "$code" = "401" ] || { echo "status was $code, expected 401 - the auth boundary is open"; exit 1; }
+
+  panel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,  target: linux,   deps: true }
+          - { os: windows-latest, target: windows, deps: false }
+          - { os: macos-latest,   target: macos,   deps: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Linux desktop needs GTK
+        if: matrix.deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - name: Enable the desktop target
+        working-directory: client
+        run: flutter config --enable-${{ matrix.target }}-desktop
+      - name: Build
+        working-directory: client
+        run: flutter build ${{ matrix.target }} --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-${{ matrix.target }}
+          path: |
+            client/build/${{ matrix.target }}/**/Release/**
+            client/build/${{ matrix.target }}/x64/release/bundle/**
+          if-no-files-found: warn
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Build the web panel
+        working-directory: client
+        run: flutter build web --release
+      - uses: actions/upload-artifact@v4
+        with: { name: panel-web, path: client/build/web }
