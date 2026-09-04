@@ -11,6 +11,8 @@ package rig
 import (
 	"fmt"
 	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -65,13 +67,15 @@ type Rig interface {
 // ⚠️ IT NEVER PRETENDS TO BE REAL. The C++ host has a rule about this: a host
 // that reports a rig it cannot reach is worse than one that refuses to start.
 type Sim struct {
-	mu   sync.RWMutex
-	snap Snapshot
-	seed *rand.Rand
+	mu       sync.RWMutex
+	snap     Snapshot
+	seed     *rand.Rand
+	settings map[string]string
 }
 
 func NewSim() *Sim {
-	s := &Sim{seed: rand.New(rand.NewSource(time.Now().UnixNano()))}
+	s := &Sim{seed: rand.New(rand.NewSource(time.Now().UnixNano())),
+		settings: map[string]string{}}
 	s.snap = Snapshot{
 		Connected: true, Freq: 7195000, Mode: "LSB", VFO: "A", PowerW: 100,
 	}
@@ -137,3 +141,75 @@ func (s *Sim) SetPTT(on bool) error {
 }
 
 func (s *Sim) Describe() string { return "simulated rig (no radio attached)" }
+
+// ── Raw CAT on the simulator ────────────────────────────────────────────────
+//
+// ⚠️ THE SIMULATOR TAKES THE SAME COMMANDS THE RADIO DOES. Without this the CAT
+// route table could only ever be tested against the live station, which means
+// every test of a control route is a transmission or a change to a radio
+// somebody is operating. A simulator that only answers status is a simulator
+// that cannot test the half of the API that matters.
+func (s *Sim) Send(cmd string) error {
+	if len(cmd) < 3 || !strings.HasSuffix(cmd, ";") || strings.Count(cmd, ";") != 1 {
+		return fmt.Errorf("%q is not a single CAT command", cmd)
+	}
+	body := strings.TrimSuffix(cmd, ";")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case strings.HasPrefix(body, "FA") && len(body) == 11:
+		hz, err := strconv.ParseInt(body[2:], 10, 64)
+		if err != nil {
+			return fmt.Errorf("%q is not a frequency", cmd)
+		}
+		s.snap.Freq = hz
+	case strings.HasPrefix(body, "MD0") && len(body) == 4:
+		for name, code := range simModeCode {
+			if code == body[3] {
+				s.snap.Mode = name
+			}
+		}
+	case strings.HasPrefix(body, "PC") && len(body) == 5:
+		w, err := strconv.Atoi(body[2:])
+		if err != nil {
+			return fmt.Errorf("%q is not a power", cmd)
+		}
+		s.snap.PowerW = w
+	case body == "TX1":
+		s.snap.TX = true
+	case body == "TX0":
+		s.snap.TX = false
+	case body == "SV":
+		s.snap.Freq, s.snap.FreqB = s.snap.FreqB, s.snap.Freq
+	}
+	// Everything else is remembered so it can be read back, which is what the
+	// toggle routes need. ⚠️ Remembered, not invented: a query for something
+	// never set answers 0, and 0 is a real setting.
+	if len(body) >= 3 {
+		s.settings[body[:3]] = body[3:]
+	}
+	return nil
+}
+
+func (s *Sim) Ask(query string) (string, error) {
+	body := strings.TrimSuffix(query, ";")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch body {
+	case "FA":
+		return fmt.Sprintf("FA%09d;", s.snap.Freq), nil
+	case "PC":
+		return fmt.Sprintf("PC%03d;", s.snap.PowerW), nil
+	}
+	if len(body) >= 3 {
+		if v, ok := s.settings[body[:3]]; ok {
+			return body[:3] + v + ";", nil
+		}
+		return body + "0;", nil
+	}
+	return "", fmt.Errorf("the simulated radio has no answer for %q", query)
+}
+
+var simModeCode = map[string]byte{
+	"LSB": '1', "USB": '2', "CW": '3', "FM": '4', "AM": '5', "DATA": '8',
+}

@@ -25,6 +25,7 @@ import (
 	"github.com/jwussler/hamdeck-go/internal/audio"
 	"github.com/jwussler/hamdeck-go/internal/auth"
 	"github.com/jwussler/hamdeck-go/internal/rig"
+	"github.com/jwussler/hamdeck-go/internal/tuner"
 )
 
 // Set by the build from the git tag. ⚠️ Not a literal: the C++ host reported
@@ -46,6 +47,8 @@ func main() {
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
 	txRecord := flag.String("tx-record", "", "TEST INSTRUMENT: write the audio clients transmit to this WAV file, with or without a sound card")
 	txRate := flag.Int("tx-rate", 44100, "the rate the host asks clients to transmit at when --tx-record is used with no sound card. Deliberately unlike the receive rate: a client that reuses the receive rate is the bug this catches")
+	tgxlHost := flag.String("tgxl", "", "antenna tuner host, e.g. 192.168.40.51. Empty = no tuner")
+	tgxlPort := flag.Int("tgxl-port", 9010, "antenna tuner TCP port")
 	audioDev := flag.String("audio", "", "capture device to stream from, matched by card name (e.g. codec). `tone:<hz>` streams a test tone instead of the radio. Empty = no audio")
 	flag.Parse()
 
@@ -181,6 +184,15 @@ func main() {
 		}
 	}
 
+	// ⚠️ THE TUNER DRIVES THE RADIO, not just the tuner: it drops to 15 W, goes
+	// to CW, keys, tunes and puts everything back. It gets the rig for that
+	// reason, and nothing else in this program hands the rig to anything.
+	var tg *tuner.TGXL
+	if *tgxlHost != "" {
+		tg = tuner.New(*tgxlHost, *tgxlPort, tunerRig{r})
+		log.Printf("tuner:     %s", tg.Describe())
+	}
+
 	// ⚠️ A TEST INSTRUMENT, and it says so out loud. It also makes the transmit
 	// socket work with no sound card, which is the only way a client's transmit
 	// path can be proved on a machine with no radio attached.
@@ -202,14 +214,14 @@ func main() {
 	ctrl := &http.Server{
 		Addr: fmt.Sprintf("127.0.0.1:%d", *control),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
-			Audio: stream, Tx: txSink, TxRec: txRec, Rig2: asRig2(r)}).Handler(),
+			Audio: stream, Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
 		Addr: fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
 			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream,
-			Tx: txSink, TxRec: txRec, Rig2: asRig2(r)}).Handler(),
+			Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -240,4 +252,46 @@ func asRig2(r rig.Rig) interface {
 		return sr
 	}
 	return nil
+}
+
+// tunerRig is the small slice of the radio the tuner is allowed to touch.
+//
+// ⚠️ DELIBERATELY NARROW. The tuner changes power, mode and PTT and puts them
+// back; handing it the whole Rig would let a future change reach further into
+// the radio than the sequence has any business going.
+type tunerRig struct{ r rig.Rig }
+
+func (t tunerRig) Snapshot() (int, string) {
+	s := t.r.Snapshot()
+	return s.PowerW, s.Mode
+}
+
+func (t tunerRig) SetPower(w int) error {
+	c, ok := t.r.(interface{ Send(string) error })
+	if !ok {
+		return fmt.Errorf("this radio does not accept a power command")
+	}
+	return c.Send(fmt.Sprintf("PC%03d;", w))
+}
+
+func (t tunerRig) SetMode(m string) error { return t.r.SetMode(m) }
+func (t tunerRig) SetPTT(on bool) error   { return t.r.SetPTT(on) }
+
+// asTuner keeps a nil tuner NIL through the interface.
+//
+// ⚠️ A typed nil in an interface is not nil, and the route would then call
+// Configured() on a nil pointer and take the host down on the first click of a
+// button the host does not even have.
+func asTuner(t *tuner.TGXL) interface {
+	Configured() bool
+	Describe() string
+	Active() bool
+	Message() string
+	Tune() error
+	Stop()
+} {
+	if t == nil {
+		return nil
+	}
+	return t
 }

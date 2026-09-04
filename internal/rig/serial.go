@@ -26,13 +26,15 @@ import (
 // sets. Reading is safe on a live station, writing is not, and /api/mode on the
 // simulator is not the same act as /api/mode on a radio somebody is operating.
 type Serial struct {
-	mu     sync.RWMutex
-	port   serial.Port
-	name   string
-	snap   Snapshot
+	mu       sync.RWMutex
+	port     serial.Port
+	name     string
+	snap     Snapshot
 	lastOK   time.Time
 	stop     chan struct{}
 	pttTimer *time.Timer
+	// When the last EX menu write went out - see send().
+	lastMenu time.Time
 }
 
 func OpenSerial(dev string, baud int) (*Serial, error) {
@@ -109,11 +111,11 @@ func (s *Serial) pollLoop() {
 // same questions at different offsets, and that is a table to fill in rather
 // than a parser to rewrite.
 func (s *Serial) pollOnce() {
-	freq, ferr := s.ask("FA;")   // VFO A frequency, 9 digits at offset 2
-	mode, merr := s.ask("MD0;")  // mode code, 1 char at offset 3
-	smtr, serr := s.ask("SM0;")  // S-meter, 3 digits at offset 3
-	pwr, perr := s.ask("PC;")    // power setting, 3 digits at offset 2
-	tx, terr := s.ask("TX;")     // transmit flag, 1 char at offset 2
+	freq, ferr := s.ask("FA;")  // VFO A frequency, 9 digits at offset 2
+	mode, merr := s.ask("MD0;") // mode code, 1 char at offset 3
+	smtr, serr := s.ask("SM0;") // S-meter, 3 digits at offset 3
+	pwr, perr := s.ask("PC;")   // power setting, 3 digits at offset 2
+	tx, terr := s.ask("TX;")    // transmit flag, 1 char at offset 2
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -182,9 +184,42 @@ func (s *Serial) Describe() string { return "serial " + s.name }
 func (s *Serial) send(cmd string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// ⚠️ MENU WRITES NEED 50 ms BETWEEN THEM. Sent back to back the rig takes the
+	// first EX and ignores the rest, SILENTLY - no error, no reply, and the
+	// setting simply does not change. The C++ host has three hand-placed sleeps
+	// in its transmit-routing sequence for exactly this; nobody writes those for
+	// fun. Enforcing it in the transport means a caller cannot forget, which is
+	// the difference between porting the timing and porting only the commands.
+	if strings.HasPrefix(cmd, "EX") {
+		if wait := 50*time.Millisecond - time.Since(s.lastMenu); wait > 0 {
+			time.Sleep(wait)
+		}
+		defer func() { s.lastMenu = time.Now() }()
+	}
 	_, err := s.port.Write([]byte(cmd))
 	return err
 }
+
+// Send is a raw CAT verb, for the route table in the API layer.
+//
+// ⚠️ IT REFUSES ANYTHING THAT IS NOT SHAPED LIKE A CAT COMMAND. The route table
+// builds these from operator input, and a stray newline or a semicolon in the
+// middle is two commands to the radio rather than one rejected string.
+func (s *Serial) Send(cmd string) error {
+	if len(cmd) < 3 || !strings.HasSuffix(cmd, ";") || strings.Count(cmd, ";") != 1 {
+		return fmt.Errorf("%q is not a single CAT command", cmd)
+	}
+	for _, r := range cmd {
+		if r < 0x20 || r > 0x7E {
+			return fmt.Errorf("CAT command contains a control character")
+		}
+	}
+	return s.send(cmd)
+}
+
+// Ask sends a query and returns the radio's reply, for routes that must read
+// before they write (cycling AGC, toggling the antenna).
+func (s *Serial) Ask(cmd string) (string, error) { return s.ask(cmd) }
 
 // SetFreq moves VFO A. ⚠️ Range-checked and REFUSED rather than clamped: a radio
 // that silently lands somewhere other than where you asked is worse than one

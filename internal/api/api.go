@@ -43,7 +43,16 @@ type Server struct {
 	// socket works with no sound card at all, which is what lets a client's
 	// transmit path be proved on a machine that has no radio attached.
 	TxRec *audio.TxRecorder
-	Rig2  interface {
+	// The antenna tuner, or nil when the host has none.
+	Tuner interface {
+		Configured() bool
+		Describe() string
+		Active() bool
+		Message() string
+		Tune() error
+		Stop()
+	}
+	Rig2 interface {
 		SetRemoteTX(bool) error
 		RemoteTXState() (bool, bool, error)
 		SetPTT(bool) error
@@ -213,7 +222,7 @@ func (s *Server) Handler() http.Handler {
 	// recorder and no per-user profiles yet; a client that asks gets "not
 	// available here" and disables the control, instead of showing an error for
 	// a feature that was never claimed.
-	for _, p := range []string{"/api/tune/tgxl/status", "/api/record/status"} {
+	for _, p := range []string{"/api/record/status"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
 			cors(w, r)
 			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
@@ -258,7 +267,10 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, 200, map[string]any{"status": "ok", "rig": s.Rig.Snapshot()})
 		})
 	}
-	set("/api/mode/", func(a string) error { return s.Rig.SetMode(strings.ToUpper(a)) })
+	// ⚠️ /api/mode/ is owned by the CAT table in rigroutes.go - it validates the
+	// mode name against the radio's codes instead of passing any string through.
+	// Registering it in both places is not a merge conflict, it is a panic at
+	// startup: net/http refuses two handlers for one pattern.
 	set("/api/freq/", func(a string) error {
 		hz, err := strconv.ParseInt(a, 10, 64)
 		if err != nil {
@@ -275,6 +287,51 @@ func (s *Server) Handler() http.Handler {
 		}
 		return errBadPTT
 	})
+
+	// ── The antenna tuner ───────────────────────────────────────────────────
+	//
+	// ⚠️ TWO ROUTES, TWO BOXES. /api/tune is the rig's own ATU; this is the
+	// TG-XL. Each names itself in its reply so a confirmation can never say just
+	// "tuning" and leave the operator guessing which one is keying up.
+	mux.HandleFunc("/api/tune/tgxl/status", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if s.Tuner == nil || !s.Tuner.Configured() {
+			writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
+				"available": false, "message": "no tuner configured on this host"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
+			"available": true, "tuning": s.Tuner.Active(),
+			"device": s.Tuner.Describe(), "message": s.Tuner.Message()})
+	})
+	mux.HandleFunc("/api/tune/tgxl", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		if s.Tuner == nil || !s.Tuner.Configured() {
+			writeJSON(w, 503, map[string]any{"status": "error", "tuner": "tgxl",
+				"available": false,
+				"message":   "no tuner configured on this host"})
+			return
+		}
+		// ⚠️ Run it in the background and answer immediately. A tune takes 3-15
+		// seconds with a carrier on the air; a client waiting on the HTTP reply
+		// cannot show progress, and a client that gives up on the request does
+		// NOT stop the sequence - the unkey has to stay with the host.
+		go func() {
+			if err := s.Tuner.Tune(); err != nil {
+				log.Printf("tgxl: %v", err)
+			}
+		}()
+		writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
+			"available": true, "tuning": true,
+			"message": "keying 15 W CW and tuning"})
+	})
+
+	// ── Everything else the radio can do, from the ported CAT table ────────
+	s.registerCAT(mux)
 
 	// ── The receiver ────────────────────────────────────────────────────────
 	if s.Audio != nil {
