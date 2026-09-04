@@ -10,6 +10,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -36,6 +37,13 @@ type Server struct {
 	AltPanelDir string
 	// The receiver, fanned out to whoever is listening.
 	Audio *audio.Stream
+	// The transmitter's audio, and the rig it routes into.
+	Tx  *audio.TxSink
+	Rig2 interface {
+		SetRemoteTX(bool) error
+		RemoteTXState() (bool, bool, error)
+		SetPTT(bool) error
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -174,6 +182,77 @@ func (s *Server) Handler() http.Handler {
 			s.Audio.Serve(r.Context(), conn)
 		})
 
+		// ── Transmit audio ──────────────────────────────────────────────────
+		// ⚠️ OPENING THIS SOCKET IS ARMING THE TRANSMITTER. It claims the audio
+		// path and points the RADIO at it (MOD SOURCE=REAR, REAR SELECT=USB),
+		// because on MIC the rig ignores the codec completely: it keys, ALC sits
+		// at idle, power reads 0, and nothing anywhere reports a fault.
+		//
+		// ⚠️ AND CLOSING IT HANDS THE STATION BACK. Unkey FIRST, then restore
+		// MIC - in that order, because a client that died while keyed leaves a
+		// carrier up, and putting MOD SOURCE back to MIC before unkeying means
+		// that open carrier is then modulated by whatever the shack can hear,
+		// with nobody at the station. The C++ host has that scar; this does not
+		// need to earn it again.
+		mux.HandleFunc("/ws/tx", func(w http.ResponseWriter, r *http.Request) {
+			if !s.authed(r) {
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			if s.Tx == nil {
+				writeJSON(w, 503, map[string]string{"status": "error",
+					"message": "this host has no transmit audio device"})
+				return
+			}
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+
+			// ⚠️ THE HOST NAMES THE FORMAT IT WANTS, FIRST. Capture and playback
+			// on this codec negotiated DIFFERENT rates (22050 in, 44100 out), so
+			// a client that reused the receive rate for transmit would send a
+			// voice at half speed - transmitting fine, metering fine, and
+			// unintelligible to everyone except the operator.
+			hello := fmt.Sprintf(`{"rate":%d,"channels":%d,"format":"s16le"}`,
+				s.Tx.Rate(), s.Tx.Channels())
+			if err := conn.Write(r.Context(), websocket.MessageText, []byte(hello)); err != nil {
+				return
+			}
+
+			if s.Rig2 != nil {
+				if err := s.Rig2.SetRemoteTX(true); err != nil {
+					conn.Write(r.Context(), websocket.MessageText,
+						[]byte(`{"status":"error","message":"could not route the radio to USB"}`))
+					return
+				}
+				rear, usb, rerr := s.Rig2.RemoteTXState()
+				// ⚠️ What the RADIO answered, not what was sent. "Unverified" is
+				// not the same as "failed", and both are different from "ok".
+				msg := fmt.Sprintf(`{"remote_tx":%t,"verified":%t,"mod_source_rear":%t,"rear_select_usb":%t}`,
+					rear && usb, rerr == nil, rear, usb)
+				conn.Write(r.Context(), websocket.MessageText, []byte(msg))
+			}
+			defer func() {
+				if s.Rig2 != nil {
+					_ = s.Rig2.SetPTT(false) // unkey FIRST
+					time.Sleep(50 * time.Millisecond)
+					_ = s.Rig2.SetRemoteTX(false) // then hand the mic back
+				}
+			}()
+
+			for {
+				typ, data, err := conn.Read(r.Context())
+				if err != nil {
+					return
+				}
+				if typ == websocket.MessageBinary {
+					s.Tx.Write(data)
+				}
+			}
+		})
+
 		// What the audio path is actually doing, as numbers a person can read.
 		mux.HandleFunc("/api/audio", func(w http.ResponseWriter, r *http.Request) {
 			cors(w, r)
@@ -189,6 +268,7 @@ func (s *Server) Handler() http.Handler {
 				// ⚠️ The LEVEL, not "frames were read". Silence and a dead
 				// receiver are indistinguishable without it.
 				"peak": peak, "peak_pct": peak * 100 / 32767,
+				"tx": txStats(s.Tx),
 			})
 		})
 	}
@@ -218,4 +298,21 @@ func logging(next http.Handler) http.Handler {
 		// token there, and a token in a log file is a credential in a log file.
 		log.Printf("%s %s (%v)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 	})
+}
+
+
+// ⚠️ THE TRANSMIT SIDE REPORTS THE LEVEL THAT REACHED THE RADIO, and the frames
+// it could not play. A microphone that is muted, a browser that captured
+// nothing, and a working operator all produce frames at exactly the right rate -
+// only the level tells them apart.
+func txStats(t *audio.TxSink) map[string]any {
+	if t == nil {
+		return map[string]any{"device": "none"}
+	}
+	written, dropped := t.Stats()
+	peak := t.Peak()
+	return map[string]any{
+		"device": t.Describe(), "peak": peak, "peak_pct": peak * 100 / 32767,
+		"frames_written": written, "dropped": dropped,
+	}
 }

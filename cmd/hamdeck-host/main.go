@@ -139,24 +139,37 @@ func main() {
 	// operator, so this refuses to start rather than serving a panel that can
 	// never make a sound.
 	var stream *audio.Stream
+	var txSink *audio.TxSink
 	if *audioDev != "" {
 		stream = audio.NewStream()
 		if err := stream.Start(*audioDev); err != nil {
 			log.Fatalf("FATAL: audio: %v", err)
 		}
-		log.Printf("audio: %s", stream.Describe())
+		log.Printf("audio in:  %s", stream.Describe())
+
+		// ⚠️ The transmit side is opened at startup too, and its failure is
+		// reported rather than discovered mid-over by an operator whose voice
+		// went nowhere.
+		txSink = audio.NewTxSink()
+		if err := txSink.Open(*audioDev); err != nil {
+			log.Printf("audio out: UNAVAILABLE - %v (receive still works; transmit will refuse)", err)
+			txSink = nil
+		} else {
+			log.Printf("audio out: %s", txSink.Describe())
+		}
 	}
 
 	ctrl := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", *control),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
-			Audio: stream}).Handler(),
+			Audio: stream, Tx: txSink, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
-			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream}).Handler(),
+			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream,
+			Tx: txSink, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -173,4 +186,19 @@ func main() {
 	if err := pub.ListenAndServe(); err != nil {
 		log.Fatalf("dashboard listener: %v", err)
 	}
+}
+
+
+// asRig2 exposes the transmit-routing methods only when the rig actually has
+// them. ⚠️ The simulator does not, and giving it a fake that returns success
+// would let a test pass on a path that cannot exist.
+func asRig2(r rig.Rig) interface {
+	SetRemoteTX(bool) error
+	RemoteTXState() (bool, bool, error)
+	SetPTT(bool) error
+} {
+	if sr, ok := r.(*rig.Serial); ok {
+		return sr
+	}
+	return nil
 }

@@ -255,6 +255,54 @@ func (s *Serial) SetPTT(on bool) error {
 	return nil
 }
 
+// ── The audio path INSIDE the radio ─────────────────────────────────────────
+//
+// ⚠️ ON MIC, THE RADIO IGNORES THE USB CODEC COMPLETELY. It keys, ALC sits at its
+// idle floor, power stays 0, and every counter in the audio chain reads perfectly
+// healthy - so a station can be "transmitting" and putting out nothing while
+// nothing anywhere reports a fault. The C++ host lost hours to exactly this, and
+// then lost an evening more because NOTHING set REAR back after a disconnect.
+//
+// ⚠️ AND IT IS A TWO-SIDED TRAP. Left on REAR, the operator's own hand mic at the
+// radio does nothing. Whatever sets this must put it back.
+//
+// ⚠️ 50 ms BETWEEN MENU WRITES. Sent back to back the rig takes the first and
+// ignores the rest, SILENTLY. The reference host has these sleeps and nobody
+// writes those for fun.
+func (s *Serial) SetRemoteTX(on bool) error {
+	if on {
+		if err := s.send("EX0101111;"); err != nil { // MOD SOURCE -> REAR
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+		if err := s.send("EX0101121;"); err != nil { // REAR SELECT -> USB
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+		return s.send("EX010113050;") // RPORT GAIN
+	}
+	return s.send("EX0101110;") // MOD SOURCE -> MIC
+}
+
+// RemoteTXState asks the RADIO what it is set to, rather than reporting what was
+// sent. ⚠️ "Commands were written" is not "the rig took them" - and a confident
+// wrong answer here sends the search for a dead transmitter to the wrong end of
+// the chain, which is precisely how the C++ host wasted an evening.
+func (s *Serial) RemoteTXState() (rear bool, usb bool, err error) {
+	r1, err := s.ask("EX010111;")
+	if err != nil {
+		return false, false, err
+	}
+	r2, err := s.ask("EX010112;")
+	if err != nil {
+		return false, false, err
+	}
+	// The reply echoes the menu number and ends with the value.
+	rear = len(r1) > 0 && r1[len(r1)-1] == '1'
+	usb = len(r2) > 0 && r2[len(r2)-1] == '1'
+	return rear, usb, nil
+}
+
 // Unkey is called when the last client goes away. ⚠️ A dropped link must not
 // leave a carrier up, and a crash, a clean quit and a dead network are
 // indistinguishable from here - so all three end the same way.

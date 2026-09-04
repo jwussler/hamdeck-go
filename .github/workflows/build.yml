@@ -11,6 +11,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      desktop:
+        description: "Also build the Windows/macOS/Linux desktop panels (macOS bills at 10x)"
+        type: boolean
+        default: false
 
 jobs:
   # The server. Fast, and it gates everything else.
@@ -50,7 +55,14 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5199/api/status)
           [ "$code" = "401" ] || { echo "status was $code, expected 401 - the auth boundary is open"; exit 1; }
 
+  # ⚠️ DESKTOP BUILDS ARE ASKED FOR, NOT AUTOMATIC, AND THE REASON IS THE BILL.
+  # This repo is PRIVATE, so its Actions minutes are billable, and macOS runners
+  # bill at 10x and Windows at 2x. Building all three desktops on every push to an
+  # experiment is a large invoice for artefacts nobody downloads. Run it when there
+  # is something to ship:
+  #     gh workflow run build.yml -f desktop=true
   panel:
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop
     strategy:
       fail-fast: false
       matrix:

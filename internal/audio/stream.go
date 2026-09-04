@@ -231,3 +231,178 @@ func (s *Stream) Clients() int {
 	defer s.mu.RUnlock()
 	return len(s.clients)
 }
+
+// ── Transmit: audio from the operator, into the radio ───────────────────────
+//
+// ⚠️ THE MIRROR OF EVERYTHING ABOVE, AND THE DANGEROUS DIRECTION. Receive audio
+// that fails is silence; transmit audio that fails is a keyed transmitter putting
+// out nothing while every counter reads healthy - which is the failure this whole
+// project keeps re-learning. So this measures what ARRIVED, not what was sent.
+
+// TxSink plays PCM from a client into the radio's codec.
+type TxSink struct {
+	mu      sync.Mutex
+	dev     *alsa.Device
+	rate    int
+	channels int
+	desc    string
+
+	peak   int
+	peakAt time.Time
+	// Frames that arrived and could not be played. ⚠️ Counted and reported, not
+	// swallowed: an operator whose audio is being dropped is transmitting a
+	// broken signal and has no other way to find out.
+	dropped int
+	written int64
+}
+
+func NewTxSink() *TxSink { return &TxSink{rate: 22050, channels: 1} }
+
+func (t *TxSink) Describe() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dev == nil {
+		return "not started"
+	}
+	return t.desc
+}
+
+// Peak is the level of audio that reached the radio, 0-32767, decaying.
+//
+// ⚠️ THIS IS THE READING THAT SEPARATES A WORKING MICROPHONE FROM A MUTED ONE.
+// Frames accepted, a queue behaving and a steady sample rate all read identically
+// for digital silence - the C++ host proved that the hard way on the night it
+// first transmitted, and this exists so the Go one never has to.
+func (t *TxSink) Peak() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.peakAt.IsZero() || time.Since(t.peakAt) > 3*time.Second {
+		return 0
+	}
+	return t.peak
+}
+
+// Rate is what the PLAYBACK device negotiated, which is not necessarily what
+// capture negotiated.
+//
+// ⚠️ ON THIS CODEC THEY DIFFER: capture takes 22050 and playback insists on
+// 44100. A client that assumed one rate for both would send the operator's voice
+// into the radio at half speed - it would transmit, the meters would look
+// healthy, and the operator would sound like a slowed-down recording to everyone
+// but themselves. The rate is told to the client rather than assumed by it.
+func (t *TxSink) Rate() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.rate
+}
+
+func (t *TxSink) Channels() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.channels
+}
+
+func (t *TxSink) Stats() (written int64, dropped int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.written, t.dropped
+}
+
+// Open finds the playback side of the codec and proves it with a write.
+func (t *TxSink) Open(match string) error {
+	cards, err := alsa.OpenCards()
+	if err != nil {
+		return err
+	}
+	for _, card := range cards {
+		if match != "" && !strings.Contains(strings.ToLower(card.Title), strings.ToLower(match)) {
+			continue
+		}
+		devs, err := card.Devices()
+		if err != nil {
+			continue
+		}
+		for _, d := range devs {
+			if !d.Play {
+				continue
+			}
+			if err := d.Open(); err != nil {
+				return fmt.Errorf("open playback: %w", err)
+			}
+			ch, err := d.NegotiateChannels(1, 2)
+			if err != nil {
+				d.Close()
+				return fmt.Errorf("channels: %w", err)
+			}
+			rate, err := d.NegotiateRate(22050, 44100, 48000)
+			if err != nil {
+				d.Close()
+				return fmt.Errorf("rate: %w", err)
+			}
+			if _, err := d.NegotiateFormat(alsa.S16_LE); err != nil {
+				d.Close()
+				return fmt.Errorf("format: %w", err)
+			}
+			frames, err := d.NegotiateBufferSize(2048, 8192)
+			if err != nil {
+				d.Close()
+				return fmt.Errorf("buffer: %w", err)
+			}
+			if err := d.Prepare(); err != nil {
+				d.Close()
+				return fmt.Errorf("prepare: %w", err)
+			}
+			t.mu.Lock()
+			t.dev, t.rate, t.channels = d, rate, ch
+			t.desc = fmt.Sprintf("alsa %s @ %d Hz %dch S16_LE, %d frame buffer",
+				card.Title, rate, ch, frames)
+			t.mu.Unlock()
+			return nil
+		}
+	}
+	return fmt.Errorf("no playback device matching %q", match)
+}
+
+// Write plays one packet of s16le audio from a client.
+func (t *TxSink) Write(pcm []byte) {
+	t.mu.Lock()
+	dev := t.dev
+	if dev == nil {
+		t.dropped++
+		t.mu.Unlock()
+		return
+	}
+	peak := 0
+	for i := 0; i+1 < len(pcm); i += 2 {
+		v := int(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
+		if v < 0 {
+			v = -v
+		}
+		if v > peak {
+			peak = v
+		}
+	}
+	if t.peakAt.IsZero() || time.Since(t.peakAt) > 1500*time.Millisecond {
+		t.peak, t.peakAt = peak, time.Now()
+	} else if peak > t.peak {
+		t.peak = peak
+	}
+	frames := len(pcm) / dev.BytesPerFrame()
+	t.written += int64(frames)
+	t.mu.Unlock()
+
+	if err := dev.Write(pcm, frames); err != nil {
+		t.mu.Lock()
+		t.dropped++
+		t.mu.Unlock()
+	}
+}
+
+func (t *TxSink) Close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dev != nil {
+		t.dev.Close()
+		t.dev = nil
+	}
+}
