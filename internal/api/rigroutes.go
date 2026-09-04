@@ -341,10 +341,10 @@ func (s *Server) registerCAT(mux routeMux) {
 		{"/api/power/limit", "limit_watts", localPowerCap},
 	} {
 		p := p
-		mux.HandleFunc(p.path, func(w http.ResponseWriter, req *http.Request) {
+		mux.HandleFunc(p.path, s.guard(func(w http.ResponseWriter, req *http.Request) {
 			cors(w, req)
 			writeJSON(w, 200, map[string]any{"status": "ok", p.field: p.val})
-		})
+		}))
 	}
 
 	// ── Nudges: read, step, write ────────────────────────────────────────────
@@ -459,11 +459,11 @@ func (s *Server) registerCAT(mux routeMux) {
 	}
 	for _, u := range unavailable {
 		u := u
-		mux.HandleFunc(u.path, func(w http.ResponseWriter, req *http.Request) {
+		mux.HandleFunc(u.path, s.guard(func(w http.ResponseWriter, req *http.Request) {
 			cors(w, req)
 			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
 				"message": u.what})
-		})
+		}))
 	}
 
 	// VFO, split and lock.

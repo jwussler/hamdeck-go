@@ -8,9 +8,14 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 EnvironmentFile=/etc/hamdeck-go/env
-ExecStart=/opt/hamdeck-go/bin/hamdeck-host     --radio /dev/ttyRIG --radio-baud 38400     --audio codec     --tgxl 192.168.40.51 --tgxl-port 9010     --record-dir /var/lib/hamdeck-go/recordings --replay-seconds 60     --panel /opt/hamdeck-go/panel     --port 5102 --control-port 5101
+ExecStart=/opt/hamdeck-go/bin/hamdeck-host     --radio /dev/ttyRIG --radio-baud 38400     --audio codec     --tgxl 192.168.40.51 --tgxl-port 9010     --record-dir /var/lib/hamdeck-go/recordings --replay-seconds 60     --cat-proxy-port 4532     --panel /opt/hamdeck-go/panel     --port 5102 --control-port 5101
 Restart=on-failure
 RestartSec=3
+# ⚠️ THIS FILE IS THE ONE THE STATION RUNS - it is copied to
+# /etc/systemd/system/hamdeck-go.service, not retyped there. The two had already
+# drifted: the box carried --cat-proxy-port 4532 and this did not, so a
+# reinstall from the .deb would have silently taken the CAT proxy away and the
+# operator's logger would have stopped working with nothing to point at.
 # ⚠️ NO DeviceAllow= here. Listing one device implicitly whitelists ONLY that
 # device, which silently blocked /dev/snd and the host died on the sound card
 # with a permissions error that looked like a broken codec. Group membership is

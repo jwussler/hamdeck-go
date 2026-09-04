@@ -3,11 +3,17 @@
 A ham radio station host and panel: CAT control, a REST API, and a remote panel —
 **Go server, Flutter client**.
 
-⚠️ **This is an experiment running beside a working system, not a replacement.** The station
-is on the air with a C++ host and a Qt client. This binds different ports, talks to a
-**simulated rig**, and never opens a serial port or an audio codec — the radio is
-single-instance hardware and two hosts fighting over it is the one way an experiment costs
-something real.
+⚠️ **This now runs the station.** It was an experiment beside the C++ host when this file was
+written, and that stopped being true on 09/04/2026: the Go host holds `/dev/ttyRIG` and the
+USB codec on VM 105, keys the transmitter, drives the TG-XL, and the C++ host is stopped.
+
+**Only one of them can run.** The radio is single-instance hardware — one process holds the
+serial bridge and the codec — so starting the C++ host while this one is up gets neither of
+them a working radio.
+
+It still talks to a **simulated rig** when `--radio` is empty, which is how everything except
+the station itself is tested. ⚠️ Three real faults passed clean on that simulator and failed
+on the radio, so the gates below are run against the STATION.
 
 ## What it is testing
 
@@ -39,6 +45,14 @@ is a credential everybody has.
 
 ## Not done yet
 
-Audio (capture, playback, the PCM socket), real serial CAT, the transmit watchdog. Those are
-the hard parts and the C++ host earns its keep on them — a comparison that skips them is not a
-comparison.
+⚠️ This list used to name audio, serial CAT and the transmit watchdog. All three are done and
+on the air; what is left is:
+
+- **Users added through the admin routes live in memory only** — an account added on the panel
+  is gone at the next restart. The station's own admin comes from `/etc/hamdeck-go/env`, which
+  does survive.
+- **The installers are unsigned** — SmartScreen warns on Windows, and the DMG needs
+  right-click → Open on macOS. This is the biggest adoption blocker left.
+- **371 ms of receive latency**, against the C++ host's shorter buffer.
+- **The transmit/receive switching time has never been measured.**
+- **LAN only.** There is no path in from outside the house yet.

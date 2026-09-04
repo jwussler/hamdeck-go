@@ -121,6 +121,31 @@ func cors(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// guard makes a handler need a live session.
+//
+// ⚠️ MEASURED, NOT REASONED ABOUT. Eleven routes on the dashboard listener were
+// answering 200 with no credential at all - what hardware the station has
+// (/api/remote/status), whether transmit is locked down, whether it is
+// recording, its power ceilings, and the whole route inventory. None of them
+// changes the radio, which is exactly why they were missed: each one reads
+// harmless on its own, and together they are a survey of somebody's station
+// answered to anyone who can reach the port.
+//
+// ⚠️ TWO ROUTES STAY OPEN ON PURPOSE: /api/health, which is how you ask "is the
+// host up" without holding a credential, and /api/auth/login and its status.
+// Everything else is gated at the point of REGISTRATION rather than by a path
+// prefix - a prefix gate that stops matching after a rename fails OPEN.
+func (s *Server) guard(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		fn(w, r)
+	}
+}
+
 func (s *Server) authed(r *http.Request) bool {
 	if s.Control {
 		return true // loopback listener: the bind IS the security model
@@ -302,7 +327,7 @@ func (s *Server) Handler() http.Handler {
 		out["status"] = "ok"
 		writeJSON(w, 200, out)
 	}
-	mux.HandleFunc("/api/record/status", recStatus)
+	mux.HandleFunc("/api/record/status", s.guard(recStatus))
 
 	recAct := func(action string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -444,7 +469,7 @@ func (s *Server) Handler() http.Handler {
 	// ⚠️ TWO ROUTES, TWO BOXES. /api/tune is the rig's own ATU; this is the
 	// TG-XL. Each names itself in its reply so a confirmation can never say just
 	// "tuning" and leave the operator guessing which one is keying up.
-	mux.HandleFunc("/api/tune/tgxl/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/tune/tgxl/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		if s.Tuner == nil || !s.Tuner.Configured() {
 			writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
@@ -454,7 +479,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
 			"available": true, "tuning": s.Tuner.Active(),
 			"device": s.Tuner.Describe(), "message": s.Tuner.Message()})
-	})
+	}))
 	mux.HandleFunc("/api/tune/tgxl", func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		if !s.authed(r) {
@@ -599,12 +624,12 @@ func (s *Server) Handler() http.Handler {
 	s.registerCAT(mux)
 
 	// What this host actually serves, from the registrations themselves.
-	mux.HandleFunc("/api/routes", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/routes", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		out := append([]string(nil), registered...)
 		sort.Strings(out)
 		writeJSON(w, 200, map[string]any{"status": "ok", "count": len(out), "routes": out})
-	})
+	}))
 
 	// ── The receiver ────────────────────────────────────────────────────────
 	if s.Audio != nil {

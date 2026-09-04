@@ -13,18 +13,22 @@ import (
 
 // Serial is a real radio on a real port.
 //
-// ⚠️ READ-ONLY, DELIBERATELY, AND IT REFUSES TO TRANSMIT.
+// ⚠️ THIS KEYS A TRANSMITTER. It was read-only once, and this comment still said
+// so long after SetPTT, the tuner sequence and the transmit watchdog were all
+// written below it - a header describing a safer program than the one it sits on
+// is worse than no header, because the next person reads it instead of the code.
 //
-// This host has no transmit watchdog yet. The rule the C++ host earned the hard
-// way is that the thing which stops a stuck carrier lives NEXT TO THE RADIO, and
-// until that exists here, a route that can key this transmitter would be a
-// hazard with a nice API in front of it. SetPTT returns an error saying so
-// rather than quietly doing nothing, because a PTT that silently fails is worse
-// than one that refuses.
+// What made keying acceptable is the WATCHDOG, and it is down at SetPTT: the
+// host arms a timer the moment it keys, and only a deliberate unkey stops it. The
+// rule the C++ host earned the hard way is that the thing which stops a stuck
+// carrier lives NEXT TO THE RADIO, never in the client - a browser tab closing, a
+// laptop sleeping and a network dropping all look identical from the panel, and
+// in every one of them the carrier stays up.
 //
-// ⚠️ AND IT NEVER PROBES WITH A CONTROL VERB. Everything below asks; nothing
-// sets. Reading is safe on a live station, writing is not, and /api/mode on the
-// simulator is not the same act as /api/mode on a radio somebody is operating.
+// ⚠️ AND THE POLLER NEVER PROBES WITH A CONTROL VERB. pollOnce only asks;
+// everything that sets is a deliberate call from a route. Reading is safe on a
+// live station, writing is not, and /api/mode on the simulator is not the same
+// act as /api/mode on a radio somebody is operating.
 type Serial struct {
 	mu       sync.RWMutex
 	port     serial.Port

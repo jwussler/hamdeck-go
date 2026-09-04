@@ -55,26 +55,31 @@ func (s *Server) registerHostFlags(mux routeMux) {
 				// front panel disagrees needs to know nothing was ever sent to it.
 				"scope": "host flag - not sent to the radio"})
 		}
-		mux.HandleFunc(f.route+"/on", func(w http.ResponseWriter, r *http.Request) {
+		// ⚠️ A SESSION, EVEN THOUGH NO CAT LEAVES THE HOST. These were open to
+		// anyone who could reach the port: /on and /off CHANGE state two
+		// operators share, and "it does not touch the radio" is not the same as
+		// "it does not matter" - the panel draws these as though they were the
+		// station's own settings.
+		mux.HandleFunc(f.route+"/on", s.guard(func(w http.ResponseWriter, r *http.Request) {
 			s.Flags.set(f.key, true)
 			reply(w, r, true)
-		})
-		mux.HandleFunc(f.route+"/off", func(w http.ResponseWriter, r *http.Request) {
+		}))
+		mux.HandleFunc(f.route+"/off", s.guard(func(w http.ResponseWriter, r *http.Request) {
 			s.Flags.set(f.key, false)
 			reply(w, r, false)
-		})
-		mux.HandleFunc(f.route+"/status", func(w http.ResponseWriter, r *http.Request) {
+		}))
+		mux.HandleFunc(f.route+"/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
 			reply(w, r, s.Flags.get(f.key))
-		})
+		}))
 	}
 	// ⚠️ /api/vfo-lock/toggle is NOT here: it is a real CAT toggle (LK) in the
 	// table, and the C++ host has both a host flag and a rig lock under names
 	// one letter apart. Registering this one too would shadow it, and the
 	// operator would get a boolean that pretends to be a locked VFO.
-	mux.HandleFunc("/api/diversity/toggle", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/diversity/toggle", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		v := s.Flags.toggle("diversity")
 		writeJSON(w, 200, map[string]any{"status": "ok", "diversity": v,
 			"scope": "host flag - not sent to the radio"})
-	})
+	}))
 }

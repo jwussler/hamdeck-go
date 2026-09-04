@@ -44,12 +44,16 @@ def cpp_routes(root):
     return found
 
 
-def go_routes(base):
+def go_routes(base, token):
     """⚠️ ASK THE HOST, DO NOT GUESS FROM THE SOURCE. Reading Go literals with
     regular expressions missed one form and reported working routes as missing;
     /api/routes is built from the same registrations the server actually serves,
-    so it cannot disagree with reality."""
-    with urllib.request.urlopen(f"{base}/api/routes", timeout=6) as r:
+    so it cannot disagree with reality.
+
+    ⚠️ IT NEEDS THE SESSION NOW. The route inventory used to answer anybody who
+    could reach the port, which is a survey of somebody's station handed out for
+    free; it is gated, so this logs in FIRST and asks with the token."""
+    with urllib.request.urlopen(f"{base}/api/routes?token={token}", timeout=6) as r:
         return set(json.loads(r.read().decode())["routes"])
 
 
@@ -77,7 +81,14 @@ def main():
     ap.add_argument("--go", default="/home/ubuntu/hamdeck-go")
     a = ap.parse_args()
 
-    cpp, go = cpp_routes(a.cpp), go_routes(a.base)
+
+    req = urllib.request.Request(
+        f"{a.base}/api/auth/login",
+        data=json.dumps({"username": a.user, "password": a.password}).encode(),
+        headers={"Content-Type": "application/json"})
+    token = json.loads(urllib.request.urlopen(req, timeout=6).read())["token"]
+
+    cpp, go = cpp_routes(a.cpp), go_routes(a.base, token)
 
     # ⚠️ A PREFIX ROUTE COVERS THE EXACT ONES UNDER IT. The C++ host registers
     # /api/mode/usb as its own entry AND a /api/mode/ prefix; counting the exact
@@ -91,11 +102,6 @@ def main():
     missing = sorted(r for r in cpp
                      if not covered(r) and r not in DELIBERATELY_ABSENT)
 
-    req = urllib.request.Request(
-        f"{a.base}/api/auth/login",
-        data=json.dumps({"username": a.user, "password": a.password}).encode(),
-        headers={"Content-Type": "application/json"})
-    token = json.loads(urllib.request.urlopen(req, timeout=6).read())["token"]
 
     # ⚠️ Call only what cannot key a transmitter or move a tuner. This runs
     # against a simulator, but the same script pointed at the station must not

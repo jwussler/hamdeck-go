@@ -49,7 +49,13 @@ const keyMap = <String, List<Key>>{
     Key('0 (zero) twice', 'clear RIT'),
   ],
   'TRANSMIT': [
-    Key('space', 'push to talk — hold to transmit, release to stop'),
+    // ⚠️ A TOGGLE, NOT HOLD-TO-TALK, AND THE TEXT SAYS SO. This line described a
+    // key that does not exist: space flips PTT on each press. Worse, hold-to-talk
+    // over a network is the wrong shape - a key-up lost to a dropped link, a
+    // window losing focus mid-over or a browser tab going to the background all
+    // leave the carrier UP, and the operator's release never arrives. Escape and
+    // the host's watchdog are what stop a transmission here.
+    Key('space', 'start / stop transmitting'),
     Key('escape', 'STOP TRANSMITTING — works from anywhere, always'),
     Key('E', 'arm / disarm the microphone'),
     Key('T', 'tune the antenna tuner'),

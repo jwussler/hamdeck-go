@@ -192,11 +192,11 @@ func (s *Server) registerAdmin(mux routeMux) {
 	}
 
 	// ── Lockdown and the remote unkey ───────────────────────────────────────
-	mux.HandleFunc("/api/admin/lockdown/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/admin/lockdown/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		writeJSON(w, 200, map[string]any{"status": "ok",
 			"lockdown": s.Lock.On(), "reason": s.Lock.Reason()})
-	})
+	}))
 	mux.HandleFunc("/api/admin/lockdown/on", admin(func(w http.ResponseWriter, r *http.Request, who string) {
 		s.Lock.Set(true, "locked by "+who)
 		// ⚠️ Turning lockdown on UNKEYS. Locking a transmitter that is currently
@@ -231,7 +231,7 @@ func (s *Server) registerAdmin(mux routeMux) {
 	}))
 
 	// What the host is, for a client deciding which controls to show.
-	mux.HandleFunc("/api/remote/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/remote/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		writeJSON(w, 200, map[string]any{"status": "ok",
 			"rig":       s.Rig.Describe(),
@@ -241,7 +241,7 @@ func (s *Server) registerAdmin(mux routeMux) {
 			"recording": s.Rec != nil,
 			"lockdown":  s.Lock.On(),
 		})
-	})
+	}))
 }
 
 func token(r *http.Request) string {
