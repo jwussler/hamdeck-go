@@ -84,16 +84,63 @@ jobs:
           # native assets" while Windows and macOS build fine, so the gap only
           # shows on the one platform this project develops on.
           sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libasound2-dev
+      - uses: actions/setup-go@v5
+        if: matrix.target == 'linux'
+        with: { go-version: '1.23', cache: true }
       - name: Enable the desktop target
         working-directory: client
         run: flutter config --enable-${{ matrix.target }}-desktop
       - name: Build
         working-directory: client
         run: flutter build ${{ matrix.target }} --release
+      # ⚠️ AN INSTALLER, NOT A ZIP. A zip asks the person downloading it to find an
+      # exe among a few hundred files and make their own shortcut; nobody does
+      # that, and the ones who try pick the wrong file. Every platform gets a
+      # real package.
+      - name: Windows installer
+        if: matrix.target == 'windows'
+        working-directory: client
+        shell: bash
+        run: |
+          set -eux
+          VER="${GITHUB_REF_NAME#v}"; [ "$VER" = "$GITHUB_REF_NAME" ] && VER=0.0.0
+          iscc //DAppVersion=$VER \
+               //DSourceDir="$(pwd -W)\\build\\windows\\x64\\runner\\Release" \
+               //O"$(pwd -W)" ../packaging/hamdeck-panel.iss
+          ls -l HamDeck-Panel-Windows-Setup.exe
+
+      - name: macOS disk image
+        if: matrix.target == 'macos'
+        working-directory: client
+        run: |
+          set -eux
+          APP="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -1)"
+          STAGE="$RUNNER_TEMP/dmg"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          # The alias is what makes drag-to-install obvious without a background
+          # image or the .DS_Store fiddling that breaks on a headless runner.
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "HamDeck Panel" -srcfolder "$STAGE" \
+                         -ov -format UDZO HamDeck-Panel-macOS.dmg
+          ls -l HamDeck-Panel-macOS.dmg
+
+      - name: Debian packages
+        if: matrix.target == 'linux'
+        run: |
+          set -eux
+          VER="${GITHUB_REF_NAME#v}"; [ "$VER" = "$GITHUB_REF_NAME" ] && VER=0.0.0
+          # ⚠️ The version goes INTO the binary, and build-deb.sh refuses to
+          # package one whose --version disagrees with the filename.
+          go build -ldflags "-X main.version=$VER" -o hamdeck-host ./cmd/hamdeck-host
+          bash packaging/build-deb.sh "$VER"
+
       - uses: actions/upload-artifact@v4
         with:
           name: panel-${{ matrix.target }}
           path: |
+            client/HamDeck-Panel-Windows-Setup.exe
+            client/HamDeck-Panel-macOS.dmg
+            dist/*.deb
             client/build/${{ matrix.target }}/**/Release/**
             client/build/${{ matrix.target }}/x64/release/bundle/**
           if-no-files-found: warn
