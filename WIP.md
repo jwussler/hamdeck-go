@@ -33,6 +33,27 @@ passed clean on the simulator and failed on the radio: crossed CAT replies, a
 parser that required a semicolon the serial transport strips, and a frequency
 length off by one.
 
+## Direction, decided 09/04/2026
+
+⚠️ **No waterfall, and no SCU-LAN10 support.** Joe: *"a lot of times on remote the
+waterfall is a smoke screen - lets make this the best remote solution that we can
+that fills real gaps"*. The SCU-LAN10 protocol work was written, tested and then
+REMOVED rather than parked. Do not reintroduce either without being asked.
+
+The real gaps, from the SCU-LAN10's own manual and from published operator
+complaints:
+
+| gap | status |
+|---|---|
+| no CAT for other software while remote | **DONE** - `--cat-proxy-port 4532` |
+| no digital modes (follows from the above) | reachable now: point WSJT-X at the proxy |
+| not keyboard operable / unusable with a screen reader | **DONE** - every action has a key, TX is announced |
+| link health invisible | **DONE** - round-trip and jitter in the header |
+| Windows-only client | **DONE** - Windows, macOS, Linux |
+| no recording | **DONE** |
+| slow transmit/receive switching | not measured yet |
+| hard to set up from outside the house | not started - LAN only |
+
 ## What is not done
 
 - Users added through the admin routes live in memory only.

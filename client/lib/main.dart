@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'api.dart';
 import 'audio/audio.dart';
+import 'keymap.dart';
 import 'keypad.dart';
 import 'readout.dart';
 import 'theme.dart';
@@ -56,6 +58,19 @@ class _PanelState extends State<Panel> {
   // surface. Nothing is removed; things move.
   int _surface = 0; // 0 OPERATE, 1 SETUP
   bool _keypad = false;
+  bool _showKeys = false;
+  final _keyFocus = FocusNode(debugLabel: 'panel');
+
+  // The tuning step the arrow keys move by. ⚠️ Shown on screen AND announced
+  // when it changes: an operator who cannot see it has no other way to know how
+  // far the next key press will move the radio.
+  int _step = 100;
+  static const _steps = [10, 100, 1000, 10000];
+
+  // ⚠️ Remembered so the panel can ANNOUNCE the change rather than only draw it.
+  // A blind operator has no ON AIR bar; being told is the only signal there is.
+  bool _wasTx = false;
+  bool _wasSilent = false;
 
   // ⚠️ SHOW THE LINK, NOT JUST THE RIG. Remote operating fails at the link far
   // more often than at the radio, and every other program in this space leaves
@@ -77,6 +92,7 @@ class _PanelState extends State<Panel> {
   @override
   void dispose() {
     _poll?.cancel();
+    _keyFocus.dispose();
     _rx.stop();
     _tx.stop();
     super.dispose();
@@ -158,6 +174,20 @@ class _PanelState extends State<Panel> {
       if (!mounted) return;
       setState(() {
         if (m != null) _meters = m;
+        // ⚠️ SAY IT OUT LOUD. Transmit state and a microphone sending silence
+        // are the two things that cannot be left to a colour on a bar.
+        final nowTx = s?['tx'] == true;
+        if (nowTx != _wasTx) {
+          _wasTx = nowTx;
+          announce(context, nowTx ? 'Transmitting' : 'Receiving', urgent: true);
+        }
+        final nowSilent = _sendingSilence;
+        if (nowSilent && !_wasSilent) {
+          announce(context,
+              'Warning. The microphone is sending silence. Nothing is going out.',
+              urgent: true);
+        }
+        _wasSilent = nowSilent;
         if (rc != null) _rec = rc;
         if (t != null) {
           _tuning = t['tuning'] == true;
@@ -356,7 +386,132 @@ class _PanelState extends State<Panel> {
   //   head        readout + meters + the LINK, always visible
   //   surface     OPERATE or SETUP, scrolls
   //   transmit    PINNED, on both surfaces, never behind a scroll
-  Widget _panel() => Stack(children: [
+
+  // ── Keyboard ──────────────────────────────────────────────────────────────
+  //
+  // ⚠️ ESCAPE STOPS TRANSMITTING, FROM ANYWHERE, ALWAYS - with the keypad open,
+  // with the help sheet up, on either surface, whatever has focus. It is the
+  // only shortcut that is unconditional, and it is the reason the overlays in
+  // this panel are not modal.
+  Future<void> _stopTransmitting() async {
+    await _api?.send('/api/ptt/off');
+    if (_tx.running) await _tx.stop();
+    if (mounted) {
+      announce(context, 'Stopped transmitting', urgent: true);
+      setState(() {});
+    }
+  }
+
+  Future<void> _tuneBy(int multiple) async {
+    final hz = (_rig?['freq'] as num?)?.toInt() ?? 0;
+    final next = hz + _step * multiple;
+    if (next < 1800000 || next > 54000000) {
+      announce(context, 'That would leave the band');
+      return;
+    }
+    await _api!.send('/api/freq/set/$next');
+    final st = await _api!.status();
+    if (mounted && st != null) setState(() => _rig = st);
+  }
+
+  void _changeStep(int dir) {
+    final i = (_steps.indexOf(_step) + dir).clamp(0, _steps.length - 1);
+    setState(() => _step = _steps[i]);
+    announce(context, _step >= 1000 ? '${_step ~/ 1000} kilohertz step' : '$_step hertz step');
+  }
+
+  Map<ShortcutActivator, VoidCallback> get _bindings => {
+        // Transmit. ⚠️ Escape first, because order in this map is the order a
+        // reader of this code learns them in.
+        const SingleActivator(LogicalKeyboardKey.escape): () { _stopTransmitting(); },
+        const SingleActivator(LogicalKeyboardKey.space): () async {
+          final tx = _rig?['tx'] == true;
+          await _api!.send(tx ? '/api/ptt/off' : '/api/ptt/on');
+          final st = await _api!.status();
+          if (mounted && st != null) setState(() => _rig = st);
+        },
+        const SingleActivator(LogicalKeyboardKey.keyE): () async {
+          if (_tx.running) {
+            await _tx.stop();
+            await _tx.startMonitor();
+          } else {
+            await _tx.start(_api!.base, _api!.token ?? '');
+          }
+          if (mounted) setState(() {});
+        },
+        const SingleActivator(LogicalKeyboardKey.keyT): () {
+          if (!_tuning) {
+            _api!.send('/api/tune/tgxl');
+            setState(() => _tuning = true);
+          }
+        },
+
+        // Tuning.
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () { _tuneBy(1); },
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () { _tuneBy(-1); },
+        const SingleActivator(LogicalKeyboardKey.arrowUp, shift: true): () { _tuneBy(10); },
+        const SingleActivator(LogicalKeyboardKey.arrowDown, shift: true): () { _tuneBy(-10); },
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () => _changeStep(1),
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _changeStep(-1),
+        const SingleActivator(LogicalKeyboardKey.keyF): () =>
+            setState(() => _keypad = !_keypad),
+
+        // Mode.
+        const SingleActivator(LogicalKeyboardKey.keyL): () => _api!.send('/api/mode/lsb'),
+        const SingleActivator(LogicalKeyboardKey.keyU): () => _api!.send('/api/mode/usb'),
+        const SingleActivator(LogicalKeyboardKey.keyC): () => _api!.send('/api/mode/cw'),
+        const SingleActivator(LogicalKeyboardKey.keyA): () => _api!.send('/api/mode/am'),
+        const SingleActivator(LogicalKeyboardKey.keyD): () => _api!.send('/api/mode/data'),
+
+        // VFO and receiver.
+        const SingleActivator(LogicalKeyboardKey.keyV): () => _api!.send('/api/vfo/swap'),
+        const SingleActivator(LogicalKeyboardKey.keyS): () => _api!.send('/api/split/toggle'),
+        const SingleActivator(LogicalKeyboardKey.keyK): () => _api!.send('/api/toggle/lock'),
+        const SingleActivator(LogicalKeyboardKey.keyG): () => _api!.send('/api/agc/cycle'),
+        const SingleActivator(LogicalKeyboardKey.keyP): () => _api!.send('/api/preamp/cycle'),
+        const SingleActivator(LogicalKeyboardKey.keyN): () => _api!.send('/api/notch/toggle'),
+        const SingleActivator(LogicalKeyboardKey.bracketLeft): () => _api!.send('/api/volume/down'),
+        const SingleActivator(LogicalKeyboardKey.bracketRight): () => _api!.send('/api/volume/up'),
+        const SingleActivator(LogicalKeyboardKey.keyR): () => _api!.send('/api/rit/down'),
+        const SingleActivator(LogicalKeyboardKey.keyR, shift: true): () => _api!.send('/api/rit/up'),
+
+        // Bands, in the order they sit on the panel.
+        for (final e in <LogicalKeyboardKey, String>{
+          LogicalKeyboardKey.digit1: '160', LogicalKeyboardKey.digit2: '80',
+          LogicalKeyboardKey.digit3: '60', LogicalKeyboardKey.digit4: '40',
+          LogicalKeyboardKey.digit5: '30', LogicalKeyboardKey.digit6: '20',
+          LogicalKeyboardKey.digit7: '17', LogicalKeyboardKey.digit8: '15',
+          LogicalKeyboardKey.digit9: '12', LogicalKeyboardKey.digit0: '10',
+          LogicalKeyboardKey.minus: '6',
+        }.entries)
+          SingleActivator(e.key): () async {
+            await _api!.send('/api/band/${e.value}');
+            final st = await _api!.status();
+            if (mounted && st != null) setState(() => _rig = st);
+          },
+
+        // ⚠️ BOTH SPELLINGS OF "?". Depending on the platform and the keyboard
+        // layout, the shifted slash arrives either as slash-with-shift or as
+        // its own "question" logical key - and binding only one means the help
+        // key silently does nothing on somebody else's keyboard.
+        const SingleActivator(LogicalKeyboardKey.slash, shift: true): () =>
+            setState(() => _showKeys = !_showKeys),
+        const SingleActivator(LogicalKeyboardKey.question): () =>
+            setState(() => _showKeys = !_showKeys),
+        const SingleActivator(LogicalKeyboardKey.question, shift: true): () =>
+            setState(() => _showKeys = !_showKeys),
+      };
+
+  Widget _panel() => CallbackShortcuts(
+        bindings: _bindings,
+        child: Focus(
+          focusNode: _keyFocus,
+          autofocus: true,
+          child: _panelBody(),
+        ),
+      );
+
+  Widget _panelBody() => Stack(children: [
         Column(children: [
           _head(),
           Expanded(
@@ -370,6 +525,12 @@ class _PanelState extends State<Panel> {
           // the bottom failed that outright, and it did.
           _transmitBar(),
         ]),
+        if (_showKeys)
+          Positioned(
+            top: 90,
+            right: 20,
+            child: KeyMapSheet(onClose: () => setState(() => _showKeys = false)),
+          ),
         // The keypad floats OVER the panel, deliberately not modal - a modal
         // popup would grey out the transmit bar behind it.
         if (_keypad)
@@ -450,8 +611,14 @@ class _PanelState extends State<Panel> {
         const SizedBox(height: 6),
         // ⚠️ A hint, once, where the gesture lives. The readout being the tuning
         // control is the single most useful thing here and the least guessable.
-        const Text('wheel or click a digit to tune  ·  shift-click zeroes below  ·  right-click for the keypad',
-            style: TextStyle(fontFamily: T.mono, fontSize: 9, color: T.dim)),
+        // ⚠️ The keyboard step is SHOWN, because the arrow keys are useless if
+        // you cannot tell how far the next press will move the radio. It is
+        // announced when it changes too, for an operator who cannot see it.
+        Text(
+            'wheel or click a digit  ·  arrows tune by '
+            '${_step >= 1000 ? "${_step ~/ 1000} kHz" : "$_step Hz"}'
+            '  ·  ? for keys',
+            style: const TextStyle(fontFamily: T.mono, fontSize: 9, color: T.dim)),
         const SizedBox(height: 8),
         _meter(),
       ]),
@@ -589,10 +756,10 @@ class _PanelState extends State<Panel> {
           _btn('RIT −', () => _api!.send('/api/rit/down')),
           _btn('RIT +', () => _api!.send('/api/rit/up')),
           _btn('CLR', () => _api!.send('/api/rit/clear')),
-          _btn('−1 k', () => _step(1000, 'down')),
-          _btn('+1 k', () => _step(1000, 'up')),
-          _btn('−100', () => _step(100, 'down')),
-          _btn('+100', () => _step(100, 'up')),
+          _btn('−1 k', () => _stepBy(1000, 'down')),
+          _btn('+1 k', () => _stepBy(1000, 'up')),
+          _btn('−100', () => _stepBy(100, 'down')),
+          _btn('+100', () => _stepBy(100, 'up')),
         ]),
         const SizedBox(height: 8),
         _powerRow(),
@@ -957,7 +1124,7 @@ class _PanelState extends State<Panel> {
         : (_rec?['message'] as String? ?? 'not available on this host'));
   }
 
-  Future<void> _step(int hz, String dir) async {
+  Future<void> _stepBy(int hz, String dir) async {
     await _api!.send('/api/step/$hz/$dir');
     final s = await _api!.status();
     if (mounted && s != null) setState(() => _rig = s);
