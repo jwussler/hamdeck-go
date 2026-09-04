@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>HamDeck — Go panel</title>
+<style>
+  html,body{margin:0;height:100%;background:#0E1013;overscroll-behavior:none}
+  #load{color:#8A929C;font:13px system-ui;padding:18px}
+</style>
+<div id="load">loading the Go panel…</div>
+<script src="wasm_exec.js"></script>
+<script>
+  // ⚠️ The panel is a Go program compiled to WebAssembly - the SAME source that
+  // builds a desktop binary. No second language, no second UI toolkit.
+  const go = new Go();
+  WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject)
+    .then(r => { document.getElementById("load").remove(); go.run(r.instance); })
+    .catch(e => { document.getElementById("load").textContent = "failed to load: " + e; });
+</script>
