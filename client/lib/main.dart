@@ -33,6 +33,11 @@ class _PanelState extends State<Panel> {
   final _host = TextEditingController();
   final _user = TextEditingController();
   final _pass = TextEditingController();
+  // ⚠️ A SETTING, NOT PART OF THE ADDRESS. Blank means the standard port, which
+  // is what a station behind a name uses. It lives under ADVANCED because
+  // needing it at all means the host is not behind a proper name yet.
+  final _port = TextEditingController();
+  bool _advanced = false;
 
   Api? _api;
   // ⚠️ The platform implementation is chosen at COMPILE time - a desktop
@@ -115,23 +120,25 @@ class _PanelState extends State<Panel> {
     // compiled into a published client points every install at one station.
     final base = Uri.base;
     if (base.scheme == 'http' || base.scheme == 'https') {
-      _host.text = base.origin;
+      // ⚠️ THE NAME, NOT THE ORIGIN. Filling this with "https://radio.wa0o.com"
+      // teaches the operator that a scheme belongs in the box; it does not.
+      // The port only appears when it is not the standard one - which is the
+      // same rule the address bar uses.
+      _host.text = base.host;
+      if (base.hasPort && base.port != 443 && base.port != 80) {
+        _port.text = '${base.port}';
+        _advanced = true;
+      }
     }
   }
 
   Future<void> _connect() async {
-    var typed = _host.text.trim();
-    if (typed.isEmpty && (Uri.base.scheme == 'http' || Uri.base.scheme == 'https')) {
-      typed = Uri.base.origin;
-    }
-    if (typed.isEmpty) {
-      setState(() => _error = 'enter the host address, e.g. radio.example.com:5102');
+    if (_host.text.trim().isEmpty &&
+        !(Uri.base.scheme == 'http' || Uri.base.scheme == 'https')) {
+      setState(() => _error = 'enter the station address, e.g. radio.wa0o.com');
       return;
     }
-    // ⚠️ Inherit the PAGE's scheme when none was typed. Defaulting to http on an
-    // https page is the same block, arrived at politely.
-    final scheme = (Uri.base.scheme == 'https') ? 'https' : 'http';
-    final base = typed.startsWith('http') ? typed : '$scheme://$typed';
+    final base = buildStationBase(_host.text, _port.text, Uri.base);
     final api = Api(base);
     final err = await api.login(_user.text.trim(), _pass.text);
     if (err != null) {
@@ -238,9 +245,29 @@ class _PanelState extends State<Panel> {
             const SizedBox(height: 6),
             Text('Go host · Flutter panel', style: T.silk()),
             const SizedBox(height: 22),
-            _field('HOST', _host, hint: 'address:5102'),
+            // ⚠️ A NAME, AND NOTHING ELSE. No scheme, no port: https is implied
+            // and the port is under ADVANCED for the case where a host has no
+            // name yet.
+            _field('STATION', _host, hint: 'radio.wa0o.com'),
             _field('USERNAME', _user),
             _field('PASSWORD', _pass, obscure: true, onSubmit: _connect),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => setState(() => _advanced = !_advanced),
+                style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 28),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                child: Text(_advanced ? 'hide advanced' : 'advanced',
+                    style: const TextStyle(
+                        fontFamily: T.mono, fontSize: 10, color: T.dim)),
+              ),
+            ),
+            if (_advanced) ...[
+              const SizedBox(height: 6),
+              _field('PORT', _port, hint: 'blank = standard (443)'),
+            ],
             const SizedBox(height: 14),
             SizedBox(
               width: double.infinity,
@@ -1220,4 +1247,56 @@ class _PanelState extends State<Panel> {
       ]),
     );
   }
+}
+
+/// Turn what the operator typed into a base URL.
+///
+/// ⚠️ HTTPS IS IMPLIED. The address of a station is a NAME - `radio.wa0o.com` -
+/// and that is the whole thing an operator should have to type. This used to
+/// demand a scheme and a port and hand back "no reply from ..." when either was
+/// missing, which reads as a dead station rather than a typo.
+///
+/// ⚠️ AND HTTPS EVEN WHEN THE CERTIFICATE IS OUR OWN. A self-signed station is
+/// still https; picking http because a certificate might not be from a public
+/// CA gets the microphone refused by every browser, because getUserMedia needs
+/// a secure context.
+///
+/// The exceptions, both deliberate:
+///   - a scheme typed explicitly wins, so `http://192.168.40.64` still works
+///     for a host with no name yet;
+///   - a page serving this panel wins over both, because a panel loaded over
+///     http must not try to talk https back to the host that sent it.
+///
+/// A port is a SETTING, not part of the address. One pasted into the host box
+/// is moved into it rather than rejected.
+String buildStationBase(String typedHost, String typedPort, Uri page) {
+  var host = typedHost.trim();
+  var port = typedPort.trim();
+
+  if (host.isEmpty && (page.scheme == 'http' || page.scheme == 'https')) {
+    return page.origin; // served by the host: it already knows where it is
+  }
+
+  var scheme = '';
+  for (final s in ['https://', 'http://']) {
+    if (host.toLowerCase().startsWith(s)) {
+      scheme = s.substring(0, s.length - 3);
+      host = host.substring(s.length);
+      break;
+    }
+  }
+  host = host.split('/').first; // a pasted path is not part of the address
+
+  // A port pasted into the host box belongs in the port box.
+  final colon = host.lastIndexOf(':');
+  if (colon > 0 && int.tryParse(host.substring(colon + 1)) != null) {
+    if (port.isEmpty) port = host.substring(colon + 1);
+    host = host.substring(0, colon);
+  }
+
+  if (scheme.isEmpty) {
+    // Inherit the page's scheme when there is one, otherwise https.
+    scheme = (page.scheme == 'http') ? 'http' : 'https';
+  }
+  return port.isEmpty ? '$scheme://$host' : '$scheme://$host:$port';
 }
