@@ -38,6 +38,8 @@ func main() {
 	panel2 := flag.String("panel-alt", "", "a second panel, served at /alt/ - for comparing two clients side by side")
 	hashPw := flag.Bool("hash-password", false, "read a password on stdin and print its hash")
 	showVer := flag.Bool("version", false, "print the version and exit")
+	radioPort := flag.String("radio", "", "serial device of the radio, e.g. /dev/ttyRIG. Empty = simulated rig")
+	radioBaud := flag.Int("radio-baud", 38400, "serial speed")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
 	flag.Parse()
@@ -95,7 +97,22 @@ func main() {
 		return
 	}
 
-	r := rig.NewSim()
+	// ⚠️ A REAL RADIO IF ASKED FOR, AND IT FAILS RATHER THAN FALLING BACK. A host
+	// that quietly runs the simulator when the port will not open comes up
+	// looking healthy and reports a rig that is not there - the C++ host refuses
+	// exactly this, for exactly this reason.
+	var r rig.Rig
+	if *radioPort != "" {
+		sr, err := rig.OpenSerial(*radioPort, *radioBaud)
+		if err != nil {
+			log.Fatalf("FATAL: %v - not falling back to the simulator, because a host "+
+				"that reports a rig it cannot reach is worse than one that refuses to start", err)
+		}
+		defer sr.Close()
+		r = sr
+	} else {
+		r = rig.NewSim()
+	}
 	a := auth.New(480)
 	if h := os.Getenv("HAMDECK_ADMIN_HASH"); h != "" {
 		if err := a.AddUser("admin", h); err != nil {
