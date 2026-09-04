@@ -24,6 +24,7 @@ import (
 	"github.com/jwussler/hamdeck-go/internal/api"
 	"github.com/jwussler/hamdeck-go/internal/audio"
 	"github.com/jwussler/hamdeck-go/internal/auth"
+	"github.com/jwussler/hamdeck-go/internal/catproxy"
 	"github.com/jwussler/hamdeck-go/internal/rig"
 	"github.com/jwussler/hamdeck-go/internal/tuner"
 )
@@ -45,6 +46,7 @@ func main() {
 	pttTimeout := flag.Duration("ptt-timeout", 180*time.Second, "the transmit watchdog: the host unkeys the rig after this long, whatever the client is doing")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
+	catPort := flag.Int("cat-proxy-port", 0, "serve raw CAT to other software on 127.0.0.1:<port> (4532 is the usual choice). 0 = off")
 	recDir := flag.String("record-dir", "", "directory for receive recordings. Empty = recording off")
 	replaySecs := flag.Int("replay-seconds", 60, "how much receive audio to keep for /api/record/replay")
 	recMaxSecs := flag.Int("record-max-seconds", 10800, "stop a recording after this long rather than filling the disk")
@@ -201,6 +203,24 @@ func main() {
 		log.Printf("recording: to %s, %ds replay buffer", *recDir, *replaySecs)
 	} else if *recDir != "" {
 		log.Printf("recording: IGNORED - there is no receive audio to record")
+	}
+
+	// ⚠️ THE POINT OF THIS: while the host holds the radio, nothing else can.
+	// The proxy is what lets a logger, WSJT-X or contest software keep working
+	// during a remote session instead of needing a virtual serial-port splitter.
+	if *catPort != 0 {
+		cr, ok := r.(catproxy.Rig)
+		if !ok {
+			log.Fatalf("FATAL: --cat-proxy-port needs a radio that accepts raw CAT; this one does not")
+		}
+		cp := catproxy.New(*catPort, cr)
+		if err := cp.Start(); err != nil {
+			log.Fatalf("FATAL: %v", err)
+		}
+		defer cp.Close()
+		log.Printf("cat proxy: %s", cp.Describe())
+		log.Printf("           N1MM: Configure Ports -> TCP -> 127.0.0.1:%d", *catPort)
+		log.Printf("           ⚠️  anything that reaches that port can key the transmitter")
 	}
 
 	// ⚠️ THE TUNER DRIVES THE RADIO, not just the tuner: it drops to 15 W, goes
