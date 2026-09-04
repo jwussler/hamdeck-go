@@ -2,6 +2,7 @@ package rig
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,8 +30,9 @@ type Serial struct {
 	port   serial.Port
 	name   string
 	snap   Snapshot
-	lastOK time.Time
-	stop   chan struct{}
+	lastOK   time.Time
+	stop     chan struct{}
+	pttTimer *time.Timer
 }
 
 func OpenSerial(dev string, baud int) (*Serial, error) {
@@ -169,13 +171,93 @@ func (s *Serial) Snapshot() Snapshot {
 	return out
 }
 
-func (s *Serial) Describe() string { return "serial " + s.name + " (read-only)" }
+func (s *Serial) Describe() string { return "serial " + s.name }
 
-// ⚠️ EVERY WRITE IS REFUSED, AND SAYS WHY. See the type comment: no watchdog
-// here yet, so nothing here may change a transmitter's state.
-const readOnly = "this host reads the radio but does not command it yet - " +
-	"there is no transmit watchdog on this side, and the watchdog belongs next to the radio"
+// ── Control ─────────────────────────────────────────────────────────────────
+//
+// ⚠️ WRITES SHARE THE PORT WITH THE POLLER, SO THEY GO THROUGH THE SAME LOCK.
+// Two goroutines writing CAT at once interleave two commands into one stream and
+// the radio acts on the wreckage - which on a transmitter is not a display glitch.
 
-func (s *Serial) SetFreq(int64) error  { return fmt.Errorf("%s", readOnly) }
-func (s *Serial) SetMode(string) error { return fmt.Errorf("%s", readOnly) }
-func (s *Serial) SetPTT(bool) error    { return fmt.Errorf("%s", readOnly) }
+func (s *Serial) send(cmd string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.port.Write([]byte(cmd))
+	return err
+}
+
+// SetFreq moves VFO A. ⚠️ Range-checked and REFUSED rather than clamped: a radio
+// that silently lands somewhere other than where you asked is worse than one
+// that says no.
+func (s *Serial) SetFreq(hz int64) error {
+	if hz < 1_800_000 || hz > 54_000_000 {
+		return fmt.Errorf("%d Hz is outside 1.8-54 MHz", hz)
+	}
+	return s.send(fmt.Sprintf("FA%09d;", hz))
+}
+
+var codeByMode = map[string]byte{
+	"LSB": '1', "USB": '2', "CW": '3', "FM": '4', "AM": '5', "DATA": '8',
+}
+
+func (s *Serial) SetMode(mode string) error {
+	code, ok := codeByMode[strings.ToUpper(mode)]
+	if !ok {
+		return fmt.Errorf("unknown mode %q", mode)
+	}
+	return s.send(fmt.Sprintf("MD0%c;", code))
+}
+
+// ⚠️ THE TRANSMIT WATCHDOG, AND IT LIVES HERE BECAUSE HERE IS NEXT TO THE RADIO.
+//
+// A client-side timeout protects nothing when the client is the thing that died:
+// a browser tab closing, a laptop sleeping and a network dropping all look
+// identical from the panel, and in every one of them the carrier stays up. So the
+// host keys the rig and immediately arms a timer that will unkey it, and only a
+// deliberate unkey - or another key press - stops that timer.
+var pttTimeout = 180 * time.Second
+
+// SetPTTTimeout makes the watchdog testable. ⚠️ A watchdog that has never fired
+// is a watchdog nobody has tested - the whole point is the path nothing takes on
+// a good day, and three minutes is too long to sit through to prove it works.
+// Refuses zero: "no timeout" is not a configuration, it is the safety removed.
+func SetPTTTimeout(d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("a transmit watchdog of %v is no watchdog at all", d)
+	}
+	pttTimeout = d
+	return nil
+}
+
+func (s *Serial) SetPTT(on bool) error {
+	s.mu.Lock()
+	if s.pttTimer != nil {
+		s.pttTimer.Stop()
+		s.pttTimer = nil
+	}
+	s.mu.Unlock()
+
+	if !on {
+		return s.send("TX0;")
+	}
+	if err := s.send("TX1;"); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.pttTimer = time.AfterFunc(pttTimeout, func() {
+		// ⚠️ Unconditional. The poll cache is up to 250 ms old and TX0; to a rig
+		// that is already receiving costs nothing - nothing is worth an open
+		// carrier.
+		_ = s.send("TX0;")
+		log.Printf("WATCHDOG: unkeyed after %s - the transmitter had been on that long", pttTimeout)
+	})
+	s.mu.Unlock()
+	return nil
+}
+
+// Unkey is called when the last client goes away. ⚠️ A dropped link must not
+// leave a carrier up, and a crash, a clean quit and a dead network are
+// indistinguishable from here - so all three end the same way.
+func (s *Serial) Unkey() {
+	_ = s.SetPTT(false)
+}

@@ -9,6 +9,7 @@ require (
 
 require (
 	gioui.org/shader v1.0.9 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/yobert/alsa v0.0.0-20230126204319-85bb7ee02e5b // indirect
 	go.bug.st/serial v1.8.0 // indirect

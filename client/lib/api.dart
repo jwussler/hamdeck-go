@@ -13,6 +13,9 @@ class Api {
   String? _token;
 
   bool get loggedIn => _token != null;
+  // The audio socket needs the same session: a browser cannot set headers on a
+  // WebSocket, so the token goes in the query.
+  String? get token => _token;
 
   Future<String?> login(String user, String pass) async {
     try {

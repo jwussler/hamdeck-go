@@ -40,8 +40,10 @@ func main() {
 	showVer := flag.Bool("version", false, "print the version and exit")
 	radioPort := flag.String("radio", "", "serial device of the radio, e.g. /dev/ttyRIG. Empty = simulated rig")
 	radioBaud := flag.Int("radio-baud", 38400, "serial speed")
+	pttTimeout := flag.Duration("ptt-timeout", 180*time.Second, "the transmit watchdog: the host unkeys the rig after this long, whatever the client is doing")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
+	audioDev := flag.String("audio", "", "capture device to stream from, matched by card name (e.g. codec). Empty = no audio")
 	flag.Parse()
 
 	if *showVer {
@@ -103,6 +105,10 @@ func main() {
 	// exactly this, for exactly this reason.
 	var r rig.Rig
 	if *radioPort != "" {
+		if err := rig.SetPTTTimeout(*pttTimeout); err != nil {
+			log.Fatalf("FATAL: %v", err)
+		}
+		log.Printf("transmit watchdog: %v", *pttTimeout)
 		sr, err := rig.OpenSerial(*radioPort, *radioBaud)
 		if err != nil {
 			log.Fatalf("FATAL: %v - not falling back to the simulator, because a host "+
@@ -128,15 +134,29 @@ func main() {
 		true: "configured", false: "NO USERS - the dashboard will refuse every login",
 	}[a.Configured()])
 
+	// ⚠️ THE RECEIVER IS OPTIONAL AND ITS FAILURE IS LOUD. A host that starts
+	// with a silent audio path looks healthy and is useless to a remote
+	// operator, so this refuses to start rather than serving a panel that can
+	// never make a sound.
+	var stream *audio.Stream
+	if *audioDev != "" {
+		stream = audio.NewStream()
+		if err := stream.Start(*audioDev); err != nil {
+			log.Fatalf("FATAL: audio: %v", err)
+		}
+		log.Printf("audio: %s", stream.Describe())
+	}
+
 	ctrl := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", *control),
-		Handler:           (&api.Server{Rig: r, Auth: a, Version: version, Control: true}).Handler(),
+		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
+			Audio: stream}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
-			PanelDir: *panel, AltPanelDir: *panel2}).Handler(),
+			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

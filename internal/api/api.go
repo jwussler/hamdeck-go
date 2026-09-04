@@ -16,6 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
+
+	"github.com/jwussler/hamdeck-go/internal/audio"
 	"github.com/jwussler/hamdeck-go/internal/auth"
 	"github.com/jwussler/hamdeck-go/internal/rig"
 )
@@ -31,6 +34,8 @@ type Server struct {
 	// SAME HOST AND THE SAME RIG. Judging two clients against different backends
 	// would measure the backends.
 	AltPanelDir string
+	// The receiver, fanned out to whoever is listening.
+	Audio *audio.Stream
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -145,6 +150,48 @@ func (s *Server) Handler() http.Handler {
 		}
 		return errBadPTT
 	})
+
+	// ── The receiver ────────────────────────────────────────────────────────
+	if s.Audio != nil {
+		mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+			if !s.authed(r) {
+				// ⚠️ 401 BEFORE THE UPGRADE. Anonymous receive audio means
+				// anyone who can reach this host can listen to the operator's
+				// receiver - the C++ host shipped exactly that once and it was
+				// a security fix, not a feature.
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+				// Same origin as the panel this host serves; a browser sends the
+				// page's origin and nothing else is expected.
+				OriginPatterns: []string{"*"},
+			})
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			s.Audio.Serve(r.Context(), conn)
+		})
+
+		// What the audio path is actually doing, as numbers a person can read.
+		mux.HandleFunc("/api/audio", func(w http.ResponseWriter, r *http.Request) {
+			cors(w, r)
+			if !s.authed(r) {
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			peak := s.Audio.Peak()
+			writeJSON(w, 200, map[string]any{
+				"status": "ok", "device": s.Audio.Describe(),
+				"rate": s.Audio.Rate, "channels": s.Audio.Channels,
+				"listeners": s.Audio.Clients(),
+				// ⚠️ The LEVEL, not "frames were read". Silence and a dead
+				// receiver are indistinguishable without it.
+				"peak": peak, "peak_pct": peak * 100 / 32767,
+			})
+		})
+	}
 
 	if s.AltPanelDir != "" {
 		mux.Handle("/alt/", http.StripPrefix("/alt/", http.FileServer(http.Dir(s.AltPanelDir))))

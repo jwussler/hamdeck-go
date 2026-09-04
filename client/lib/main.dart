@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'api.dart';
+import 'rx_audio.dart';
 import 'theme.dart';
 
 void main() => runApp(const HamDeckApp());
@@ -30,6 +31,7 @@ class _PanelState extends State<Panel> {
   final _pass = TextEditingController();
 
   Api? _api;
+  final _rx = RxAudio();
   Map<String, dynamic>? _rig;
   String? _error;
   Timer? _poll;
@@ -38,6 +40,7 @@ class _PanelState extends State<Panel> {
   @override
   void dispose() {
     _poll?.cancel();
+    _rx.stop();
     super.dispose();
   }
 
@@ -87,6 +90,11 @@ class _PanelState extends State<Panel> {
       _api = api;
       _error = null;
     });
+    // ⚠️ THE RECEIVER STARTS WITH THE SESSION. An operator who logs into a radio
+    // panel wants to HEAR the radio; making them find a second button to turn on
+    // the thing they came for is a menu, not a feature.
+    _rx.start(api.base, api.token ?? '');
+
     _poll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       final s = await _api!.status();
       if (!mounted) return;
@@ -223,6 +231,8 @@ class _PanelState extends State<Panel> {
         ]),
       ),
       _meter(),
+      const SizedBox(height: 6),
+      _audioBar(),
       const SizedBox(height: 8),
       _keys('MODE', const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'],
           (m) => '/api/mode/$m', selected: '${_rig?['mode']}'),
@@ -261,12 +271,42 @@ class _PanelState extends State<Panel> {
         child: Text(
           _stale
               ? '⚠ no reply from the host — showing the last reading'
-              : 'connected · ${_rig?['s_meter'] ?? 0}/255 raw',
+              : 'audio: ${_rx.status} · ${_rx.packets} packets · level ${_rx.level}%',
           style: TextStyle(
               color: _stale ? T.amber : T.dim, fontSize: 11, fontFamily: T.mono),
         ),
       ),
     ]);
+  }
+
+  /// ⚠️ THE CLIENT'S OWN MEASUREMENT OF WHAT IT PLAYED, not the host's of what it
+  /// captured. The two can disagree, and the disagreement is the interesting
+  /// case: audio that left the radio and never reached the operator. Nothing
+  /// else in this panel can tell you that.
+  Widget _audioBar() {
+    final lvl = _rx.level / 100.0;
+    final dead = _rx.playing && _rx.level == 0;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+          color: T.ground,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: dead ? T.amber : T.line)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(dead ? 'RECEIVER · ARRIVING SILENT' : 'RECEIVER', style: T.silk()),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            value: lvl,
+            minHeight: 14,
+            backgroundColor: T.panelDeep,
+            valueColor: AlwaysStoppedAnimation(dead ? T.amber : T.cyan),
+          ),
+        ),
+      ]),
+    );
   }
 
   Widget _stat(String k, String v) => Column(children: [
