@@ -39,6 +39,8 @@ class _PanelState extends State<Panel> {
   String? _error;
   Timer? _poll;
   List<MicDevice> _mics = const [];
+  bool _tuning = false;
+  String _tunerMsg = '';
   DateTime? _lastGood;
 
   @override
@@ -102,8 +104,24 @@ class _PanelState extends State<Panel> {
 
     _poll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       final s = await _api!.status();
+      // ⚠️ The tune state comes from the HOST, not from the button. The client
+      // that started the tune can be closed, crash, or be a different machine
+      // entirely, and the carrier is still on the air - so the panel asks who
+      // actually knows rather than remembering what it did.
+      final t = await _api!.send('/api/tune/tgxl/status');
       if (!mounted) return;
       setState(() {
+        if (t != null) {
+          _tuning = t['tuning'] == true;
+          // ⚠️ Say WHEN the message is from. The host keeps the last tune's
+          // result, so a failure from ten minutes ago was being drawn next to an
+          // idle button as though it were happening now - a stale message
+          // presented as current is the same fault as a stale meter reading.
+          final msg = t['message'] as String? ?? '';
+          _tunerMsg = (t['available'] == false)
+              ? 'no tuner configured on this host'
+              : (_tuning || msg.isEmpty ? msg : 'last tune: $msg');
+        }
         // the audio meters are updated by their own callbacks; this repaint is
         // what makes them visible
         if (s != null) {
@@ -352,9 +370,27 @@ class _PanelState extends State<Panel> {
       const SizedBox(height: 6),
       _audioBar(),
       const SizedBox(height: 8),
-      _keys('MODE', const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'],
-          (m) => '/api/mode/$m', selected: '${_rig?['mode']}'),
-      const Spacer(),
+      // ⚠️ THE CONTROLS SCROLL, THE TRANSMIT CONTROLS DO NOT. On a short window
+      // the old layout simply clipped: the microphone picker and PTT were drawn
+      // off the bottom edge with no way to reach them, which on a short screen
+      // means an armed transmitter you cannot unkey from the panel. Anything to
+      // do with keying stays pinned below; everything else scrolls.
+      Expanded(
+        child: SingleChildScrollView(
+          child: Column(children: [
+            _keys('BAND', const ['160', '80', '60', '40', '30', '20', '17', '15',
+                '12', '10', '6'], (b) => '/api/band/$b'),
+      const SizedBox(height: 8),
+      _tunerRow(),
+      const SizedBox(height: 8),
+      _powerRow(),
+      const SizedBox(height: 8),
+            _keys('MODE', const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'],
+                (m) => '/api/mode/$m', selected: '${_rig?['mode']}'),
+            const SizedBox(height: 10),
+          ]),
+        ),
+      ),
       // ⚠️ ARM AND PTT ARE SEPARATE, and that is not a UI preference. Arming
       // claims the audio path and points the RADIO at it; PTT keys the
       // transmitter. Rolling them into one control means connecting can land you
@@ -487,6 +523,114 @@ class _PanelState extends State<Panel> {
             minHeight: 14,
             backgroundColor: T.panelDeep,
             valueColor: AlwaysStoppedAnimation(_stale ? T.amberDim : T.okGreen),
+          ),
+        ),
+      ]),
+    );
+  }
+
+
+  // ⚠️ TWO TUNERS, NAMED. /api/tune is the rig's own ATU; the TG-XL is a separate
+  // box on the network. The C++ host keeps them apart and makes each name itself
+  // in its reply, precisely so a confirmation can never say just "tuning" and
+  // leave the operator guessing which one is about to key up. Same here: two
+  // buttons, each labelled with the thing it keys.
+  Widget _tunerRow() => Container(
+        margin: const EdgeInsets.symmetric(horizontal: 10),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+            color: T.panel,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: _tuning ? T.amber : T.line)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('ANTENNA TUNER', style: T.silk()),
+          const SizedBox(height: 8),
+          Row(children: [
+            SizedBox(
+              width: 150,
+              height: 44,
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                    backgroundColor: _tuning ? T.amber : T.panelDeep,
+                    foregroundColor: _tuning ? T.ground : T.text,
+                    side: BorderSide(color: _tuning ? T.amber : T.line),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(5))),
+                // ⚠️ Refused while a tune is running rather than queued. This
+                // keys the transmitter; a second press must not start a second
+                // sequence behind the first.
+                onPressed: _tuning ? null : () async {
+                  await _api!.send('/api/tune/tgxl');
+                  if (mounted) setState(() => _tuning = true);
+                },
+                child: Text(_tuning ? 'TUNING…' : 'TUNE  TG-XL',
+                    style: const TextStyle(letterSpacing: 1)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 130,
+              height: 44,
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                    backgroundColor: T.panelDeep,
+                    foregroundColor: T.text,
+                    side: const BorderSide(color: T.line),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(5))),
+                onPressed: _tuning ? null : () => _api!.send('/api/tune'),
+                child: const Text('RIG ATU', style: TextStyle(letterSpacing: 1)),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(_tunerMsg,
+                  style: TextStyle(
+                      fontFamily: T.mono,
+                      fontSize: 11,
+                      color: _tuning ? T.amber : T.dim)),
+            ),
+          ]),
+        ]),
+      );
+
+  Widget _powerRow() {
+    final w = (_rig?['power'] as num?)?.toInt() ?? 0;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+          color: T.panel,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: T.line)),
+      child: Row(children: [
+        Text('POWER', style: T.silk()),
+        const SizedBox(width: 12),
+        SizedBox(
+          width: 62,
+          child: Text('$w W',
+              style: const TextStyle(
+                  fontFamily: T.mono, fontSize: 16, color: T.amber)),
+        ),
+        Expanded(
+          child: Slider(
+            value: w.clamp(0, 100).toDouble(),
+            max: 100,
+            divisions: 20,
+            activeColor: T.amber,
+            inactiveColor: T.line,
+            label: '$w W',
+            // ⚠️ Sent on RELEASE, not on every drag frame. A slider that fires
+            // per frame puts a hundred CAT writes on a serial port that answers
+            // one at a time, and the radio ends up wherever the queue drained
+            // to rather than where the operator let go.
+            onChanged: (v) => setState(
+                () => _rig = {...?_rig, 'power': v.round()}),
+            onChangeEnd: (v) async {
+              await _api!.send('/api/power/set/${v.round()}');
+              final st = await _api!.status();
+              if (mounted && st != null) setState(() => _rig = st);
+            },
           ),
         ),
       ]),
