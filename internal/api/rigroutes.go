@@ -172,6 +172,9 @@ func (s *Server) registerCAT(mux *http.ServeMux) {
 		{"/api/notch/toggle", "BC0;", "BC00;", "BC01;"},
 		{"/api/toggle/notch", "BC0;", "BC00;", "BC01;"},
 		{"/api/ant/rx/toggle", "EX030103;", "EX0301030;", "EX0301031;"},
+		{"/api/split/toggle", "ST;", "ST0;", "ST1;"},
+		{"/api/toggle/lock", "LK;", "LK0;", "LK1;"},
+		{"/api/vfo-lock/toggle", "LK;", "LK0;", "LK1;"},
 	}
 	for _, t := range toggles {
 		t := t
@@ -260,6 +263,127 @@ func (s *Server) registerCAT(mux *http.ServeMux) {
 			return []string{fmt.Sprintf(st.format, v)}, map[string]any{st.field: v}, nil
 		})
 	}
+	// VFO, split and lock.
+	for path, cat := range map[string]string{
+		"/api/vfo/a":     "VS0;",
+		"/api/vfo/b":     "VS1;",
+		"/api/lock/on":   "LK1;",
+		"/api/lock/off":  "LK0;",
+		"/api/split/on":  "ST1;",
+		"/api/split/off": "ST0;",
+	} {
+		cat := cat
+		s.catRoute(mux, path, func(_ string) ([]string, map[string]any, error) {
+			return []string{cat}, nil, nil
+		})
+	}
+
+	// ⚠️ SH00<nn>, and the index is NOT the width in Hz. The C++ host carries
+	// both so the reply can tell the operator the bandwidth they actually got
+	// rather than the filter number, which means nothing at the microphone.
+	for _, wsp := range []struct {
+		name string
+		idx  int
+		hz   int
+	}{{"narrow", 6, 1800}, {"medium", 10, 2400}, {"wide", 14, 3000}} {
+		wsp := wsp
+		s.catRoute(mux, "/api/width/"+wsp.name, func(_ string) ([]string, map[string]any, error) {
+			return []string{fmt.Sprintf("SH00%02d;", wsp.idx)},
+				map[string]any{"width": wsp.name, "hz": wsp.hz}, nil
+		})
+	}
+
+	// ⚠️ RU/RD CARRY A FOUR-DIGIT OFFSET - a bare "RU;" is not a command, it is a
+	// query, and sending it where a nudge was meant moves nothing while looking
+	// like it worked. The offset is read first and the verb picked by sign.
+	for _, n := range []struct {
+		path  string
+		delta int
+	}{{"/api/rit/up", 100}, {"/api/rit/down", -100}} {
+		n := n
+		s.catRoute(mux, n.path, func(_ string) ([]string, map[string]any, error) {
+			cur, err := toggleState(r, "RT;") // current RIT offset
+			if err != nil {
+				cur = 0 // an unreadable offset is treated as zero, not refused:
+				// the nudge is relative and the radio is about to be told an
+				// absolute value either way.
+			}
+			next := cur + n.delta
+			cat := fmt.Sprintf("RU%04d;", next)
+			if next < 0 {
+				cat = fmt.Sprintf("RD%04d;", -next)
+			}
+			return []string{cat}, map[string]any{"rit": next}, nil
+		})
+	}
+
+	// ⚠️ READ-MODIFY-WRITE. Stepping and copying need the CURRENT frequency, so
+	// they read it back from the radio rather than from the panel's last poll -
+	// which can be half a second old, and half a second is several clicks of a
+	// tuning knob.
+	s.catPrefix(mux, "/api/step/", func(a string) ([]string, map[string]any, error) {
+		parts := strings.Split(a, "/")
+		if len(parts) != 2 {
+			return nil, nil, fmt.Errorf("expected <hz>/<up|down>")
+		}
+		hz, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("step is not a number")
+		}
+		if parts[1] != "up" && parts[1] != "down" {
+			return nil, nil, fmt.Errorf("direction must be up or down")
+		}
+		if parts[1] == "down" {
+			hz = -hz
+		}
+		cur, err := readFreq(r, "FA;")
+		if err != nil {
+			return nil, nil, err
+		}
+		next := cur + hz
+		if next < 1_800_000 || next > 54_000_000 {
+			return nil, nil, fmt.Errorf("stepping there would leave 1.8-54 MHz")
+		}
+		return []string{fmt.Sprintf("FA%09d;", next)},
+			map[string]any{"freq": next, "from": cur}, nil
+	})
+	for _, c := range []struct{ path, from, to string }{
+		{"/api/vfo-copy/a2b", "FA;", "FB"},
+		{"/api/vfo-copy/b2a", "FB;", "FA"},
+	} {
+		c := c
+		s.catRoute(mux, c.path, func(_ string) ([]string, map[string]any, error) {
+			f, err := readFreq(r, c.from)
+			if err != nil {
+				return nil, nil, err
+			}
+			return []string{fmt.Sprintf("%s%09d;", c.to, f)},
+				map[string]any{"freq": f}, nil
+		})
+	}
+}
+
+// readFreq asks the radio where it is and refuses to guess.
+//
+// ⚠️ NINE DIGITS AT OFFSET 2. The reply offsets in this protocol are NOT
+// uniform - the S-meter is three digits at offset 3 and reading it as four
+// returned a plausible zero for a live band. A short or malformed reply here is
+// an error, never a frequency.
+func readFreq(r catRig, query string) (int64, error) {
+	reply, err := r.Ask(query)
+	if err != nil {
+		return 0, fmt.Errorf("the radio did not answer %s: %w", query, err)
+	}
+	reply = strings.TrimSpace(reply)
+	prefix := strings.TrimSuffix(query, ";")
+	if len(reply) < len(prefix)+10 || !strings.HasPrefix(reply, prefix) {
+		return 0, fmt.Errorf("the radio answered %q to %s, which is not a frequency", reply, query)
+	}
+	hz, err := strconv.ParseInt(reply[len(prefix):len(prefix)+9], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("the radio answered %q to %s, which is not a number", reply, query)
+	}
+	return hz, nil
 }
 
 type catBuilder func(arg string) ([]string, map[string]any, error)

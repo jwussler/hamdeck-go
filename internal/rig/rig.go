@@ -185,8 +185,15 @@ func (s *Sim) Send(cmd string) error {
 	// Everything else is remembered so it can be read back, which is what the
 	// toggle routes need. ⚠️ Remembered, not invented: a query for something
 	// never set answers 0, and 0 is a real setting.
+	// Key by the verb, not by a fixed width: "ST1" is a two-letter verb with one
+	// digit, "PA01" is three letters and one digit.
 	if len(body) >= 3 {
 		s.settings[body[:3]] = body[3:]
+	}
+	if len(body) >= 2 {
+		if _, taken := s.settings[body[:2]]; taken || len(body) == 3 {
+			s.settings[body[:2]] = body[2:]
+		}
 	}
 	return nil
 }
@@ -201,9 +208,17 @@ func (s *Sim) Ask(query string) (string, error) {
 	case "PC":
 		return fmt.Sprintf("PC%03d;", s.snap.PowerW), nil
 	}
-	if len(body) >= 3 {
-		if v, ok := s.settings[body[:3]]; ok {
-			return body[:3] + v + ";", nil
+	// ⚠️ Two-letter verbs are real verbs. ST; and LK; are queries just as much as
+	// PA0; is, and a simulator that only understood three-character prefixes
+	// answered "no such command" to them - which made the split and lock routes
+	// look broken when the routes were fine and the test double was not.
+	if len(body) >= 2 {
+		key := body
+		if len(body) > 3 {
+			key = body[:3]
+		}
+		if v, ok := s.settings[key]; ok {
+			return key + v + ";", nil
 		}
 		return body + "0;", nil
 	}
