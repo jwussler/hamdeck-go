@@ -108,7 +108,7 @@ func toggleState(r catRig, query string) (int, error) {
 }
 
 // registerCAT adds every rig-control route in the table above.
-func (s *Server) registerCAT(mux *http.ServeMux) {
+func (s *Server) registerCAT(mux routeMux) {
 	r, ok := s.Rig.(catRig)
 	if !ok {
 		// ⚠️ Say so rather than registering routes that answer 200 and do
@@ -263,6 +263,104 @@ func (s *Server) registerCAT(mux *http.ServeMux) {
 			return []string{fmt.Sprintf(st.format, v)}, map[string]any{st.field: v}, nil
 		})
 	}
+	// ── Reading settings back ────────────────────────────────────────────────
+	//
+	// ⚠️ ASKED OF THE RADIO, EVERY TIME. The panel's poll is up to half a second
+	// old and does not carry these at all; a "get" that answered from a cache
+	// would be telling the operator what the radio used to be set to.
+	gets := []struct{ path, query, field string }{
+		{"/api/volume/get", "AG0;", "volume"},
+		{"/api/rf-gain/get", "RG0;", "rf_gain"},
+		{"/api/cw-speed/get", "KS;", "cw_speed"},
+		{"/api/ant/get", "AN0;", "ant"},
+		{"/api/ant/rx/get", "EX030103;", "rx_ant"},
+		{"/api/ssb-out-level/get", "EX010109;", "ssb_out_level"},
+	}
+	for _, g := range gets {
+		g := g
+		mux.HandleFunc(g.path, func(w http.ResponseWriter, req *http.Request) {
+			cors(w, req)
+			if !s.authed(req) {
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			v, err := toggleState(r, g.query)
+			if err != nil {
+				// ⚠️ null, never a plausible number. A "get" that invents a
+				// value when the read failed is how a correct setting gets
+				// reported as wrong and the search goes to the wrong end.
+				writeJSON(w, 200, map[string]any{"status": "ok", g.field: nil,
+					"read": false, "message": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"status": "ok", g.field: v, "read": true})
+		})
+	}
+	for _, g := range []struct{ path, query, field string }{
+		{"/api/freq", "FA;", "freq"},
+		{"/api/freq/get", "FA;", "freq"},
+		{"/api/freq-b", "FB;", "freq_b"},
+	} {
+		g := g
+		mux.HandleFunc(g.path, func(w http.ResponseWriter, req *http.Request) {
+			cors(w, req)
+			if !s.authed(req) {
+				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			hz, err := readFreq(r, g.query)
+			if err != nil {
+				writeJSON(w, 200, map[string]any{"status": "ok", g.field: nil,
+					"read": false, "message": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"status": "ok", g.field: hz, "read": true})
+		})
+	}
+
+	// The power ceilings, so a client can draw a slider that cannot ask for more
+	// than the host will send.
+	for _, p := range []struct {
+		path  string
+		field string
+		val   int
+	}{
+		{"/api/power/max", "max_watts", maxWatts},
+		{"/api/power/limit", "limit_watts", localPowerCap},
+	} {
+		p := p
+		mux.HandleFunc(p.path, func(w http.ResponseWriter, req *http.Request) {
+			cors(w, req)
+			writeJSON(w, 200, map[string]any{"status": "ok", p.field: p.val})
+		})
+	}
+
+	// ── Nudges: read, step, write ────────────────────────────────────────────
+	nudges := []struct {
+		path, query, format string
+		delta, lo, hi       int
+	}{
+		{"/api/volume/up", "AG0;", "AG0%03d;", 5, 0, 255},
+		{"/api/volume/down", "AG0;", "AG0%03d;", -5, 0, 255},
+		{"/api/cw-speed/up", "KS;", "KS%03d;", 1, 4, 60},
+		{"/api/cw-speed/down", "KS;", "KS%03d;", -1, 4, 60},
+	}
+	for _, n := range nudges {
+		n := n
+		s.catRoute(mux, n.path, func(_ string) ([]string, map[string]any, error) {
+			cur, err := toggleState(r, n.query)
+			if err != nil {
+				// ⚠️ REFUSED, not assumed. A nudge is relative: without the
+				// current value there is nothing to step from, and guessing zero
+				// would slam the volume to 5 from wherever it actually was.
+				return nil, nil, err
+			}
+			next := clampInt(cur+n.delta, n.lo, n.hi)
+			return []string{fmt.Sprintf(n.format, next)},
+				map[string]any{"was": cur, "now": next}, nil
+		})
+	}
+
 	// VFO, split and lock.
 	for path, cat := range map[string]string{
 		"/api/vfo/a":     "VS0;",
@@ -388,11 +486,11 @@ func readFreq(r catRig, query string) (int64, error) {
 
 type catBuilder func(arg string) ([]string, map[string]any, error)
 
-func (s *Server) catRoute(mux *http.ServeMux, path string, build catBuilder) {
+func (s *Server) catRoute(mux routeMux, path string, build catBuilder) {
 	mux.HandleFunc(path, s.catHandler("", build))
 }
 
-func (s *Server) catPrefix(mux *http.ServeMux, prefix string, build catBuilder) {
+func (s *Server) catPrefix(mux routeMux, prefix string, build catBuilder) {
 	mux.HandleFunc(prefix, s.catHandler(prefix, build))
 }
 

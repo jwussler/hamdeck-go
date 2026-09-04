@@ -157,6 +157,12 @@ func (s *Sim) Send(cmd string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
+	case strings.HasPrefix(body, "FB") && len(body) == 11:
+		hz, err := strconv.ParseInt(body[2:], 10, 64)
+		if err != nil {
+			return fmt.Errorf("%q is not a frequency", cmd)
+		}
+		s.snap.FreqB = hz
 	case strings.HasPrefix(body, "FA") && len(body) == 11:
 		hz, err := strconv.ParseInt(body[2:], 10, 64)
 		if err != nil {
@@ -205,6 +211,8 @@ func (s *Sim) Ask(query string) (string, error) {
 	switch body {
 	case "FA":
 		return fmt.Sprintf("FA%09d;", s.snap.Freq), nil
+	case "FB":
+		return fmt.Sprintf("FB%09d;", s.snap.FreqB), nil
 	case "PC":
 		return fmt.Sprintf("PC%03d;", s.snap.PowerW), nil
 	}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,9 @@ type Server struct {
 	// socket works with no sound card at all, which is what lets a client's
 	// transmit path be proved on a machine that has no radio attached.
 	TxRec *audio.TxRecorder
+	// Settings the host remembers on the panel's behalf; see hostflags.go.
+	Flags *hostFlags
+
 	// The antenna tuner, or nil when the host has none.
 	Tuner interface {
 		Configured() bool
@@ -57,6 +61,23 @@ type Server struct {
 		RemoteTXState() (bool, bool, error)
 		SetPTT(bool) error
 	}
+}
+
+// routeMux records every pattern registered.
+//
+// ⚠️ SO THE HOST CAN BE ASKED WHAT IT SERVES, rather than a script guessing from
+// the source with regular expressions. The parity checker was reporting routes
+// as missing because it could not see one particular Go literal form - a
+// checklist that cries wolf stops being read, and this removes the guessing
+// entirely: the answer comes from the same registration the server actually uses.
+type routeMux struct {
+	*http.ServeMux
+	paths *[]string
+}
+
+func (m routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	*m.paths = append(*m.paths, pattern)
+	m.ServeMux.HandleFunc(pattern, h)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -92,7 +113,9 @@ func (s *Server) authed(r *http.Request) bool {
 }
 
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+	real := http.NewServeMux()
+	var registered []string
+	mux := routeMux{ServeMux: real, paths: &registered}
 
 	// Health takes no session on purpose: it is how you ask "is the host up"
 	// without holding a credential, and it says nothing about the band.
@@ -232,8 +255,17 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/api/remote-tx/on", func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) || s.Rig2 == nil {
+		// ⚠️ TWO DIFFERENT FAULTS, TWO DIFFERENT ANSWERS. Folding "no radio
+		// attached" into 401 "login required" sends the operator to check their
+		// password when the host simply has no rig - a confident wrong answer,
+		// which this project has already paid for once on a transmit route.
+		if !s.authed(r) {
 			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		if s.Rig2 == nil {
+			writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
+				"message": "this host has no radio that can be routed for remote transmit"})
 			return
 		}
 		if err := s.Rig2.SetRemoteTX(true); err != nil {
@@ -331,7 +363,19 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// ── Everything else the radio can do, from the ported CAT table ────────
+	if s.Flags == nil {
+		s.Flags = newHostFlags()
+	}
+	s.registerHostFlags(mux)
 	s.registerCAT(mux)
+
+	// What this host actually serves, from the registrations themselves.
+	mux.HandleFunc("/api/routes", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		out := append([]string(nil), registered...)
+		sort.Strings(out)
+		writeJSON(w, 200, map[string]any{"status": "ok", "count": len(out), "routes": out})
+	})
 
 	// ── The receiver ────────────────────────────────────────────────────────
 	if s.Audio != nil {
@@ -489,12 +533,12 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	if s.AltPanelDir != "" {
-		mux.Handle("/alt/", http.StripPrefix("/alt/", http.FileServer(http.Dir(s.AltPanelDir))))
+		real.Handle("/alt/", http.StripPrefix("/alt/", http.FileServer(http.Dir(s.AltPanelDir))))
 	}
 	if s.PanelDir != "" {
 		// Registered last so every /api/ route above wins; the panel takes the
 		// rest, including deep links a browser reload asks for.
-		mux.Handle("/", http.FileServer(http.Dir(s.PanelDir)))
+		real.Handle("/", http.FileServer(http.Dir(s.PanelDir)))
 	}
 	return logging(mux)
 }
