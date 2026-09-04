@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -91,12 +92,16 @@ func toggleState(r catRig, query string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("the radio did not answer %s: %w", query, err)
 	}
-	reply = strings.TrimSpace(reply)
+	// ⚠️ THE TERMINATOR IS OPTIONAL HERE. The serial transport strips the
+	// trailing ";" and the simulator kept it, so this check passed every test on
+	// the simulator and refused every real reading on the radio - a parser that
+	// only works against the test double. Accept both and require neither.
+	reply = strings.TrimSuffix(strings.TrimSpace(reply), ";")
 	prefix := strings.TrimSuffix(query, ";")
-	if !strings.HasPrefix(reply, prefix) || !strings.HasSuffix(reply, ";") {
+	if !strings.HasPrefix(reply, prefix) {
 		return 0, fmt.Errorf("the radio answered %q to %s, which is not a reading of it", reply, query)
 	}
-	digits := strings.TrimSuffix(strings.TrimPrefix(reply, prefix), ";")
+	digits := strings.TrimPrefix(reply, prefix)
 	if digits == "" {
 		return 0, fmt.Errorf("the radio answered %q to %s with no value", reply, query)
 	}
@@ -368,6 +373,99 @@ func (s *Server) registerCAT(mux routeMux) {
 		})
 	}
 
+	// ── CW ───────────────────────────────────────────────────────────────────
+	//
+	// ⚠️ SENDING CW KEYS THE TRANSMITTER, so it is gated exactly like PTT. KY1
+	// takes the text; KY0 stops. The rig's buffer is small and it refuses text
+	// while full, which is a real answer and gets passed through rather than
+	// swallowed.
+	s.catPrefix(mux, "/api/cw/send/", func(a string) ([]string, map[string]any, error) {
+		if s.Lock != nil && s.Lock.On() {
+			return nil, nil, fmt.Errorf("transmit is locked down: %s", s.Lock.Reason())
+		}
+		text, err := url.PathUnescape(a)
+		if err != nil {
+			return nil, nil, fmt.Errorf("that is not valid text")
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, nil, fmt.Errorf("nothing to send")
+		}
+		if len(text) > 24 {
+			// The rig's keyer buffer is short. Refusing is better than sending
+			// the first 24 characters of a callsign exchange and stopping.
+			return nil, nil, fmt.Errorf("%d characters is more than the rig's keyer buffer takes (24)", len(text))
+		}
+		// ⚠️ A semicolon inside the text would end the CAT command early and the
+		// rest would be interpreted as verbs. Refuse it rather than strip it:
+		// silently sending something other than what was typed is worse.
+		if strings.ContainsAny(text, ";\r\n") {
+			return nil, nil, fmt.Errorf("CW text cannot contain a semicolon or a newline")
+		}
+		return []string{"KY1" + strings.ToUpper(text) + ";"},
+			map[string]any{"sent": strings.ToUpper(text)}, nil
+	})
+	s.catPrefix(mux, "/api/cw/memory/", func(a string) ([]string, map[string]any, error) {
+		if s.Lock != nil && s.Lock.On() {
+			return nil, nil, fmt.Errorf("transmit is locked down: %s", s.Lock.Reason())
+		}
+		n, err := strconv.Atoi(a)
+		if err != nil || n < 1 || n > 5 {
+			return nil, nil, fmt.Errorf("CW memory must be 1-5")
+		}
+		return []string{fmt.Sprintf("KM%d;", n)}, map[string]any{"memory": n}, nil
+	})
+	mux.HandleFunc("/api/cw/status", func(w http.ResponseWriter, req *http.Request) {
+		cors(w, req)
+		if !s.authed(req) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		speed, err := toggleState(r, "KS;")
+		out := map[string]any{"status": "ok", "keyer_buffer_chars": 24}
+		if err != nil {
+			out["speed_wpm"] = nil
+			out["read"] = false
+			out["message"] = err.Error()
+		} else {
+			out["speed_wpm"] = speed
+			out["read"] = true
+		}
+		writeJSON(w, 200, out)
+	})
+
+	// ── Things this host does not have, said plainly ─────────────────────────
+	//
+	// ⚠️ THESE ARE NOT CAT COMMANDS AND MUST NOT BECOME ANY. /api/rxant/ drives
+	// a KMTronic relay box that is not configured here, and the first version of
+	// this file invented an EX menu write for it - a made-up verb aimed at a
+	// live radio, which would have changed a menu setting nobody asked to
+	// change. Read the reference before writing a verb; the reference says this
+	// route reports unavailable.
+	//
+	// A client shows "not available here" and disables the control, which is
+	// what a 200 with available:false is for. A 404 would look like a broken
+	// host.
+	unavailable := []struct{ path, what string }{
+		{"/api/rxant/", "the receive antenna switch is not configured - it needs a KMTronic relay host"},
+		{"/api/preset/", "presets are not configured on this host"},
+		{"/api/voice/play/", "the voice keyer is not implemented on this host"},
+		{"/api/voice/status", "the voice keyer is not implemented on this host"},
+		{"/api/voice/stop", "the voice keyer is not implemented on this host"},
+		{"/api/amp/tune", "there is no amplifier configured on this host"},
+		{"/api/tune/amp", "there is no amplifier configured on this host"},
+		{"/api/tune/amp/", "there is no amplifier configured on this host"},
+		{"/api/tune/amp/status", "there is no amplifier configured on this host"},
+	}
+	for _, u := range unavailable {
+		u := u
+		mux.HandleFunc(u.path, func(w http.ResponseWriter, req *http.Request) {
+			cors(w, req)
+			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
+				"message": u.what})
+		})
+	}
+
 	// VFO, split and lock.
 	for path, cat := range map[string]string{
 		"/api/vfo/a":     "VS0;",
@@ -479,9 +577,12 @@ func readFreq(r catRig, query string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("the radio did not answer %s: %w", query, err)
 	}
-	reply = strings.TrimSpace(reply)
+	reply = strings.TrimSuffix(strings.TrimSpace(reply), ";")
 	prefix := strings.TrimSuffix(query, ";")
-	if len(reply) < len(prefix)+10 || !strings.HasPrefix(reply, prefix) {
+	// ⚠️ NINE digits after the verb, so the reply is prefix+9 - not prefix+10.
+	// The extra character was the semicolon this no longer expects, and it made
+	// every real frequency read one character too short.
+	if len(reply) < len(prefix)+9 || !strings.HasPrefix(reply, prefix) {
 		return 0, fmt.Errorf("the radio answered %q to %s, which is not a frequency", reply, query)
 	}
 	hz, err := strconv.ParseInt(reply[len(prefix):len(prefix)+9], 10, 64)

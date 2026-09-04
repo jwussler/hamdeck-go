@@ -86,6 +86,21 @@ func (m routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.R
 	m.ServeMux.HandleFunc(pattern, h)
 }
 
+// mayTransmit answers the one question every keying path has to ask.
+//
+// ⚠️ TWO SEPARATE REFUSALS, NAMED SEPARATELY. "Locked down" and "your account
+// cannot transmit" are different problems with different fixes, and folding them
+// into one message sends somebody to the wrong person for help.
+func (s *Server) mayTransmit(r *http.Request) (bool, string) {
+	if s.Lock != nil && s.Lock.On() {
+		return false, "transmit is locked down: " + s.Lock.Reason()
+	}
+	if !s.Auth.CanTransmit(token(r)) {
+		return false, "this account can listen but not transmit"
+	}
+	return true, ""
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -354,9 +369,8 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
 			return
 		}
-		if s.Lock != nil && s.Lock.On() {
-			writeJSON(w, 403, map[string]any{"status": "error", "lockdown": true,
-				"message": "transmit is locked down: " + s.Lock.Reason()})
+		if ok, why := s.mayTransmit(r); !ok {
+			writeJSON(w, 403, map[string]any{"status": "error", "message": why})
 			return
 		}
 		if s.Rig2 == nil {
@@ -386,6 +400,15 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			arg := strings.TrimPrefix(r.URL.Path, path)
+			// ⚠️ The keying check happens HERE, where the request is, rather
+			// than inside the command builder - which has no request and would
+			// have to be handed a permission it could silently ignore.
+			if path == "/api/ptt/" && arg == "on" {
+				if ok, why := s.mayTransmit(r); !ok {
+					writeJSON(w, 403, map[string]string{"status": "error", "message": why})
+					return
+				}
+			}
 			if err := fn(arg); err != nil {
 				// ⚠️ The radio's objection, passed through verbatim. A generic
 				// "failed" sends the operator hunting in the wrong place.
@@ -409,12 +432,6 @@ func (s *Server) Handler() http.Handler {
 	set("/api/ptt/", func(a string) error {
 		switch a {
 		case "on":
-			// ⚠️ CHECKED HERE, NOT IN THE CLIENT. A lockdown the client enforces
-			// asks the misbehaving client to stop transmitting - which is the
-			// one program that has already shown it will not.
-			if s.Lock != nil && s.Lock.On() {
-				return fmt.Errorf("transmit is locked down: %s", s.Lock.Reason())
-			}
 			return s.Rig.SetPTT(true)
 		case "off":
 			return s.Rig.SetPTT(false)
@@ -455,10 +472,9 @@ func (s *Server) Handler() http.Handler {
 		// caught the tuner happily answering "keying 15 W CW and tuning" while
 		// the station was locked down. A lockdown that stops PTT and leaves a
 		// button that puts a carrier on the air has not locked anything down.
-		if s.Lock != nil && s.Lock.On() {
-			writeJSON(w, 403, map[string]any{"status": "error", "lockdown": true,
-				"tuner": "tgxl", "tuning": false,
-				"message": "transmit is locked down: " + s.Lock.Reason()})
+		if ok, why := s.mayTransmit(r); !ok {
+			writeJSON(w, 403, map[string]any{"status": "error",
+				"tuner": "tgxl", "tuning": false, "message": why})
 			return
 		}
 		// ⚠️ Run it in the background and answer immediately. A tune takes 3-15
@@ -473,6 +489,102 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
 			"available": true, "tuning": true,
 			"message": "keying 15 W CW and tuning"})
+	})
+
+	// ⚠️ THE SAME TUNER UNDER ITS OTHER NAME. The C++ host answers both
+	// /api/tune/tgxl and /api/tgxl/tune, and a client built against either one
+	// must work. An alias is cheaper than an operator finding out which spelling
+	// their client uses at the moment they want to tune.
+	mux.HandleFunc("/api/tgxl/tune", func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/api/tune/tgxl"
+		real.ServeHTTP(w, r2)
+	})
+
+	// What the transmit audio path is and what it could be.
+	mux.HandleFunc("/api/tx-audio/status", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"status": "ok", "tx": txStats(s.Tx)})
+	})
+	mux.HandleFunc("/api/tx-audio/devices", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		// ⚠️ THE MICROPHONE IS ON THE CLIENT, NOT HERE. On the C++ host the
+		// transmit audio device is the machine's own sound card; on this one the
+		// operator's microphone lives in the panel, and the host's transmit
+		// device is the fixed link into the radio. Listing the host's inputs
+		// would offer the operator a choice that changes nothing they can hear.
+		writeJSON(w, 200, map[string]any{"status": "ok",
+			"devices": []any{},
+			"message": "the microphone is chosen in the client; this host's transmit device is the link to the radio",
+			"host_device": func() string {
+				if s.Tx == nil {
+					return ""
+				}
+				return s.Tx.Describe()
+			}()})
+	})
+
+	// ⚠️ REGISTERED WHETHER OR NOT THERE IS A RADIO. These used to appear only
+	// when a rig was attached, so the route list - and therefore the parity
+	// checklist - changed shape depending on what was plugged in. A client
+	// cannot ask "does this host support remote transmit" if the answer is a
+	// 404 that also means "wrong URL".
+	mux.HandleFunc("/api/remote-tx/status", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		if s.Rig2 == nil {
+			writeJSON(w, 200, map[string]any{"status": "ok", "supported": false})
+			return
+		}
+		rear, usb, err := s.Rig2.RemoteTXState()
+		if err != nil {
+			// ⚠️ Unverified is NOT the same as false. Saying "MIC" when the
+			// read failed would be a confident wrong answer about a
+			// transmitter.
+			writeJSON(w, 200, map[string]any{"status": "ok", "verified": false,
+				"message": "the radio did not answer: " + err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"status": "ok", "verified": true,
+			"mod_source_rear": rear, "rear_select_usb": usb,
+			"hand_mic_live": !rear})
+	})
+
+	mux.HandleFunc("/api/remote-tx/off", func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		if !s.authed(r) {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		if s.Rig2 == nil {
+			writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
+				"message": "this host has no radio that can be routed for remote transmit"})
+			return
+		}
+		// ⚠️ UNKEY FIRST, THEN HAND THE MICROPHONE BACK. Putting MOD SOURCE back
+		// to MIC while the transmitter is keyed leaves a keyed radio modulated
+		// by whatever is in front of it.
+		_ = s.Rig2.SetPTT(false)
+		if err := s.Rig2.SetRemoteTX(false); err != nil {
+			writeJSON(w, 502, map[string]any{"status": "error",
+				"message": "the radio did not take the routing back: " + err.Error()})
+			return
+		}
+		rear, usb, rerr := s.Rig2.RemoteTXState()
+		writeJSON(w, 200, map[string]any{"status": "ok", "remote_tx": rear && usb,
+			"verified": rerr == nil, "mod_source_rear": rear, "rear_select_usb": usb,
+			"hand_mic_live": !rear})
 	})
 
 	// ── Everything else the radio can do, from the ported CAT table ────────
@@ -534,9 +646,8 @@ func (s *Server) Handler() http.Handler {
 				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
 				return
 			}
-			if s.Lock != nil && s.Lock.On() {
-				writeJSON(w, 403, map[string]any{"status": "error", "lockdown": true,
-					"message": "transmit is locked down: " + s.Lock.Reason()})
+			if ok, why := s.mayTransmit(r); !ok {
+				writeJSON(w, 403, map[string]any{"status": "error", "message": why})
 				return
 			}
 			if s.Tx == nil && s.TxRec == nil {
@@ -610,29 +721,6 @@ func (s *Server) Handler() http.Handler {
 		// silently reverting to MIC is the single most expensive failure this
 		// project has had. It is also how you find out your hand mic is dead
 		// because a remote client left the rig on REAR.
-		mux.HandleFunc("/api/remote-tx/status", func(w http.ResponseWriter, r *http.Request) {
-			cors(w, r)
-			if !s.authed(r) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
-			if s.Rig2 == nil {
-				writeJSON(w, 200, map[string]any{"status": "ok", "supported": false})
-				return
-			}
-			rear, usb, err := s.Rig2.RemoteTXState()
-			if err != nil {
-				// ⚠️ Unverified is NOT the same as false. Saying "MIC" when the
-				// read failed would be a confident wrong answer about a
-				// transmitter.
-				writeJSON(w, 200, map[string]any{"status": "ok", "verified": false,
-					"message": "the radio did not answer: " + err.Error()})
-				return
-			}
-			writeJSON(w, 200, map[string]any{"status": "ok", "verified": true,
-				"mod_source_rear": rear, "rear_select_usb": usb,
-				"hand_mic_live": !rear})
-		})
 
 		// What the audio path is actually doing, as numbers a person can read.
 		mux.HandleFunc("/api/audio", func(w http.ResponseWriter, r *http.Request) {

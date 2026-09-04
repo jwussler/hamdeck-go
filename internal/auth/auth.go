@@ -23,9 +23,23 @@ import (
 
 const iterations = 350000
 
+// Perms is what one account is allowed to do.
+//
+// ⚠️ CAN-TRANSMIT IS THE ONE THAT MATTERS. The station config this is ported
+// from has a "listener" account with can_transmit false, and an account that can
+// listen to a radio is a very different thing from one that can key it. A
+// permission model where everyone who can log in can transmit is not a
+// permission model.
+type Perms struct {
+	CanTransmit bool `json:"can_transmit"`
+	IsAdmin     bool `json:"is_admin"`
+	IsStation   bool `json:"is_station"`
+}
+
 type Service struct {
 	mu       sync.RWMutex
 	users    map[string]string // username -> hash
+	perms    map[string]Perms
 	sessions map[string]session
 	ttl      time.Duration
 }
@@ -41,6 +55,7 @@ func New(ttlMinutes int) *Service {
 	}
 	return &Service{
 		users:    map[string]string{},
+		perms:    map[string]Perms{},
 		sessions: map[string]session{},
 		ttl:      time.Duration(ttlMinutes) * time.Minute,
 	}
@@ -62,7 +77,17 @@ func (s *Service) AddUser(name, hash string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	first := len(s.users) == 0
 	s.users[name] = hash
+	if first {
+		// ⚠️ RECORDED, NOT INFERRED. This used to be worked out on the fly as
+		// "if there is exactly one user, they are the admin" - which quietly
+		// revoked the founder's own administrator rights the instant they added
+		// a second account, locking them out of the page they were standing on.
+		// A permission that exists only while some other condition holds is not
+		// a permission.
+		s.perms[name] = Perms{CanTransmit: true, IsAdmin: true}
+	}
 	return nil
 }
 
@@ -240,4 +265,37 @@ func (s *Service) RemoveUser(name string) error {
 		}
 	}
 	return nil
+}
+
+// SetPerms records what an account may do.
+func (s *Service) SetPerms(name string, p Perms) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.users[name]; !ok {
+		return fmt.Errorf("there is no user called %q", name)
+	}
+	s.perms[name] = p
+	return nil
+}
+
+// PermsOf answers for a username. ⚠️ An unknown user gets NOTHING, not
+// everything: a permission lookup that fails open is worse than no permissions.
+func (s *Service) PermsOf(name string) Perms {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if name == "" {
+		return Perms{}
+	}
+	// Every account added after the first starts with nothing and has to be
+	// granted what it needs.
+	return s.perms[name]
+}
+
+// CanTransmit is the question every keying route asks.
+func (s *Service) CanTransmit(token string) bool {
+	return s.PermsOf(s.Who(token)).CanTransmit
+}
+
+func (s *Service) IsAdmin(token string) bool {
+	return s.PermsOf(s.Who(token)).IsAdmin
 }

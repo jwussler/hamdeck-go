@@ -101,15 +101,33 @@ def main():
     # against a simulator, but the same script pointed at the station must not
     # put a carrier on the air to tick a checkbox.
     UNSAFE = ("/ptt/", "/tune", "/cw/send", "/record", "/api/admin/")
+    # ⚠️ Routes that END THE TEST'S OWN SESSION. Calling logout partway through
+    # an alphabetical sweep turned 51 working routes into "login required" and
+    # read exactly like an authentication regression. A checker must not break
+    # the thing it is measuring.
+    SELF_HARM = ("/api/auth/logout",)
     broken = []
     called = 0
     for r in sorted(go):
+        # ⚠️ A websocket answers 426 to a plain GET, which is CORRECT. Calling
+        # them over HTTP measures nothing; they are exercised by
+        # check_audio_roundtrip.sh, which actually speaks the protocol.
+        if r.startswith("/ws"):
+            continue
         if any(u in r for u in UNSAFE) or r.endswith("/"):
             continue
-        if r in ("/api/auth/login",):
+        if r in ("/api/auth/login",) or r in SELF_HARM:
             continue
         code, body = call(a.base, r, token)
         called += 1
+        # ⚠️ "This host has no such hardware" is a CORRECT answer, not a fault.
+        # A route that says supported/available false is doing its job; marking
+        # it broken would mean the checklist could never come back clean on a
+        # host without an amplifier, a tuner or a radio - and a gate that always
+        # reports something stops being read.
+        not_here = body.get("supported") is False or body.get("available") is False
+        if code == 503 and not_here:
+            continue
         if code != 200 or body.get("status") == "error":
             broken.append((r, code, body.get("message", "")))
 

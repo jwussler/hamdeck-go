@@ -53,6 +53,15 @@ func (s *Server) registerAdmin(mux routeMux) {
 				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
 				return
 			}
+			// ⚠️ ADMIN ROUTES NEED THE ADMIN FLAG, not just a session. Every
+			// logged-in user could add accounts and lock down the station
+			// otherwise, which makes the read-only "listener" account a
+			// full administrator.
+			if strings.HasPrefix(r.URL.Path, "/api/admin/") && !s.Auth.IsAdmin(tok) {
+				writeJSON(w, 403, map[string]string{"status": "error",
+					"message": "that needs an administrator account"})
+				return
+			}
 			fn(w, r, who)
 		}
 	}
@@ -79,7 +88,11 @@ func (s *Server) registerAdmin(mux routeMux) {
 	}))
 
 	mux.HandleFunc("/api/admin/users", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
-		writeJSON(w, 200, map[string]any{"status": "ok", "users": s.Auth.Users()})
+		users := []map[string]any{}
+		for _, u := range s.Auth.Users() {
+			users = append(users, map[string]any{"username": u, "perms": s.Auth.PermsOf(u)})
+		}
+		writeJSON(w, 200, map[string]any{"status": "ok", "users": users})
 	}))
 
 	mux.HandleFunc("/api/admin/user/add", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
@@ -140,6 +153,43 @@ func (s *Server) registerAdmin(mux routeMux) {
 		n := s.Auth.Kick(id)
 		writeJSON(w, 200, map[string]any{"status": "ok", "ended": n})
 	}))
+
+	// Per-account permissions, the three flags the station config carries.
+	for _, f := range []struct {
+		path string
+		set  func(*auth.Perms, bool)
+	}{
+		{"/api/admin/user/tx/", func(p *auth.Perms, v bool) { p.CanTransmit = v }},
+		{"/api/admin/user/admin/", func(p *auth.Perms, v bool) { p.IsAdmin = v }},
+		{"/api/admin/user/station/", func(p *auth.Perms, v bool) { p.IsStation = v }},
+	} {
+		f := f
+		mux.HandleFunc(f.path, admin(func(w http.ResponseWriter, r *http.Request, who string) {
+			// <name>/<on|off>
+			rest := strings.TrimPrefix(r.URL.Path, f.path)
+			name, val, ok := strings.Cut(rest, "/")
+			if !ok || (val != "on" && val != "off") {
+				writeJSON(w, 400, map[string]string{"status": "error",
+					"message": "expected <username>/<on|off>"})
+				return
+			}
+			// ⚠️ You cannot remove your own admin rights. It is always a
+			// mistake and the person who made it is the one who can no longer
+			// undo it.
+			if name == who && f.path == "/api/admin/user/admin/" && val == "off" {
+				writeJSON(w, 400, map[string]string{"status": "error",
+					"message": "that would remove your own administrator access"})
+				return
+			}
+			p := s.Auth.PermsOf(name)
+			f.set(&p, val == "on")
+			if err := s.Auth.SetPerms(name, p); err != nil {
+				writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"status": "ok", "user": name, "perms": p})
+		}))
+	}
 
 	// ── Lockdown and the remote unkey ───────────────────────────────────────
 	mux.HandleFunc("/api/admin/lockdown/status", func(w http.ResponseWriter, r *http.Request) {

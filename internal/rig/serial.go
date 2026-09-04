@@ -33,6 +33,8 @@ type Serial struct {
 	lastOK   time.Time
 	stop     chan struct{}
 	pttTimer *time.Timer
+	// ⚠️ Serialises the whole write-then-read exchange. See ask().
+	cat sync.Mutex
 	// When the last EX menu write went out - see send().
 	lastMenu time.Time
 }
@@ -53,10 +55,63 @@ func OpenSerial(dev string, baud int) (*Serial, error) {
 
 func (s *Serial) Close() { close(s.stop); s.port.Close() }
 
-// ask sends one CAT command and reads until the terminating semicolon.
+// ask sends one CAT command and reads the reply that belongs to it.
+//
+// ⚠️ ONE CONVERSATION AT A TIME, AND THE REPLY MUST MATCH THE QUESTION. A serial
+// port is a single shared stream: the 4 Hz poll loop and every HTTP request were
+// writing into it concurrently and then reading "the next reply", so answers
+// arrived against the wrong questions. On the live station this produced
+//
+//	AG0;  ->  FA007188600
+//	AG0;  ->  LK5
+//	LK;   ->  BC01
+//
+// - a volume query answered with a frequency. Nothing was mis-set only because
+// every caller checks that the reply starts with the verb it asked about and
+// refuses otherwise; without that, a toggle would have written a value derived
+// from some other command's answer, to a radio, on the air.
+//
+// So: the exchange lock is held across write AND read, and a reply whose prefix
+// does not match is DISCARDED and the read retried rather than returned. The
+// second half matters as much as the first - a reply already sitting in the
+// buffer from a previous command would otherwise be handed to the next caller.
 func (s *Serial) ask(cmd string) (string, error) {
-	if _, err := s.port.Write([]byte(cmd)); err != nil {
-		return "", err
+	s.cat.Lock()
+	defer s.cat.Unlock()
+	verb := catVerb(cmd)
+	deadlineAll := time.Now().Add(1200 * time.Millisecond)
+	for attempt := 0; attempt < 4 && time.Now().Before(deadlineAll); attempt++ {
+		reply, err := s.askOnce(cmd)
+		if err != nil {
+			return "", err
+		}
+		if verb == "" || strings.HasPrefix(reply, verb) {
+			return reply, nil
+		}
+		// Somebody else's answer, or a stale one. Drop it and read again
+		// WITHOUT re-sending: re-asking would add another reply to the backlog
+		// and make the mismatch permanent.
+		cmd = ""
+	}
+	return "", fmt.Errorf("no reply to %q that matches it", verb)
+}
+
+// catVerb is the leading letters a reply must start with to belong to a query.
+func catVerb(cmd string) string {
+	body := strings.TrimSuffix(cmd, ";")
+	for i, r := range body {
+		if r < 'A' || r > 'Z' {
+			return body[:i]
+		}
+	}
+	return body
+}
+
+func (s *Serial) askOnce(cmd string) (string, error) {
+	if cmd != "" {
+		if _, err := s.port.Write([]byte(cmd)); err != nil {
+			return "", err
+		}
 	}
 	buf := make([]byte, 0, 64)
 	one := make([]byte, 1)
@@ -207,8 +262,13 @@ func (s *Serial) Describe() string { return "serial " + s.name }
 // the radio acts on the wreckage - which on a transmitter is not a display glitch.
 
 func (s *Serial) send(cmd string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// ⚠️ THE SAME LOCK AS ask(), not the snapshot lock. A write taken out while
+	// another exchange is mid-read injects bytes into the middle of somebody
+	// else's reply - the same crossed-answers fault, arriving from the other
+	// direction. The snapshot mutex protected the wrong thing entirely: it
+	// guards the struct's fields, not the wire.
+	s.cat.Lock()
+	defer s.cat.Unlock()
 	// ⚠️ MENU WRITES NEED 50 ms BETWEEN THEM. Sent back to back the rig takes the
 	// first EX and ignores the rest, SILENTLY - no error, no reply, and the
 	// setting simply does not change. The C++ host has three hand-placed sleeps
