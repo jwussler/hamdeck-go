@@ -10,15 +10,27 @@ route has a note here it is because `src/api.cpp`, `src/tgxl.cpp` or
 `docs/internal/CARRYOVER.md` says so in a comment written after something broke.
 Port the note with the code.
 
-## Where the two hosts stand
+## Where the two hosts stand — DONE 09/04/2026
 
-| | C++ host | Go host, today |
+`tools/parity.py` against the live station: **every C++ route has a Go route, and
+every Go route answers.** 137 C++ routes, 127 Go routes (fewer because one prefix
+covers several exact ones), 78 called and read back.
+
+⚠️ **Re-run it after any change here**, and re-run it against the STATION, not
+just the simulator. Every one of the faults below passed on the simulator:
+
+- CAT replies arriving against the wrong questions (`AG0;` → `FA007188600`)
+- a parser that required the trailing `;` the simulator kept and the serial
+  transport strips
+- frequency replies read as prefix+10 instead of prefix+9
+
+| | C++ host | Go host |
 |---|---|---|
-| generated rig routes | 53 | 3 |
-| prefix (parameterised) routes | 23 | 0 (freq/mode/ptt are hand-written) |
-| tuner | TGXL over TCP + internal ATU, kept separate | none |
-| recording / replay | yes | none |
-| admin (users, sessions, lockdown, remote unkey) | yes | none |
+| rig routes | 53 generated + 23 prefix | **all covered** |
+| tuner | TGXL over TCP + internal ATU, kept separate | **both, and lockdown covers both** |
+| recording / replay | yes | **yes, measured by pitch** |
+| admin, sessions, lockdown, remote unkey | yes | **yes, and lockdown blocks all five keying paths** |
+| per-account can_transmit / is_admin | yes | **yes** |
 
 ## 1. Rig control — the CAT table
 
@@ -114,10 +126,24 @@ in-progress state, recording + replay, and the admin page.
   packets went out under a lit ON AIR bar on 09/04/2026. Level, loudly — not a
   packet count.
 
-## Order of work
+## Done, and how each was proved
 
-1. microphone chooser + local monitor + silence alarm  ← the on-air fault
-2. the tuner
-3. the CAT table above
-4. the panel controls to match
-5. recording, then admin
+1. **microphone chooser + local monitor + silence alarm** — the panel meters the
+   chosen input with nothing armed and nothing transmitted, and shouts when
+   packets flow at zero level. `_loadMics()` had been written and never called.
+2. **the tuner** — 2.9 s on the live radio, restored 100 W USB unkeyed. With the
+   tuner switched off it never keys at all.
+3. **the CAT table** — one table, toggles read the radio first, 50 ms between
+   menu writes enforced in the transport.
+4. **the panel** — band, mode, VFO, RIT, step, receiver, tuner, power, recording.
+5. **recording + admin** — recording proved by measuring the WAV, not by reading
+   its status route; lockdown proved by trying all five keying paths.
+
+## Still open
+
+- The host keeps users in memory: an account added through the admin routes does
+  not survive a restart. The station's own admin comes from
+  `/etc/hamdeck-go/env` and does.
+- No installer signing yet. The Windows setup is unsigned (SmartScreen warns) and
+  the DMG is unsigned and un-notarised (right-click → Open on first launch).
+- 371 ms of receive latency, against the C++ host's shorter buffer.
