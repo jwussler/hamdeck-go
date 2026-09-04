@@ -44,6 +44,8 @@ func main() {
 	pttTimeout := flag.Duration("ptt-timeout", 180*time.Second, "the transmit watchdog: the host unkeys the rig after this long, whatever the client is doing")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
+	txRecord := flag.String("tx-record", "", "TEST INSTRUMENT: write the audio clients transmit to this WAV file, with or without a sound card")
+	txRate := flag.Int("tx-rate", 44100, "the rate the host asks clients to transmit at when --tx-record is used with no sound card. Deliberately unlike the receive rate: a client that reuses the receive rate is the bug this catches")
 	audioDev := flag.String("audio", "", "capture device to stream from, matched by card name (e.g. codec). `tone:<hz>` streams a test tone instead of the radio. Empty = no audio")
 	flag.Parse()
 
@@ -179,17 +181,35 @@ func main() {
 		}
 	}
 
+	// ⚠️ A TEST INSTRUMENT, and it says so out loud. It also makes the transmit
+	// socket work with no sound card, which is the only way a client's transmit
+	// path can be proved on a machine with no radio attached.
+	var txRec *audio.TxRecorder
+	if *txRecord != "" {
+		rate, channels := *txRate, 1
+		if txSink != nil {
+			rate, channels = txSink.Rate(), txSink.Channels()
+		}
+		var err error
+		txRec, err = audio.NewTxRecorder(*txRecord, rate, channels)
+		if err != nil {
+			log.Fatalf("FATAL: --tx-record: %v", err)
+		}
+		defer txRec.Close()
+		log.Printf("⚠️  %s", txRec.Describe())
+	}
+
 	ctrl := &http.Server{
 		Addr: fmt.Sprintf("127.0.0.1:%d", *control),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
-			Audio: stream, Tx: txSink, Rig2: asRig2(r)}).Handler(),
+			Audio: stream, Tx: txSink, TxRec: txRec, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
 		Addr: fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
 			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream,
-			Tx: txSink, Rig2: asRig2(r)}).Handler(),
+			Tx: txSink, TxRec: txRec, Rig2: asRig2(r)}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

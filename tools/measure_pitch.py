@@ -78,8 +78,13 @@ def main():
     hint = ""
     # Name the fault rather than just the number: a factor of two is a rate
     # mismatch, and that is the whole reason this check exists.
-    for factor, why in ((2.0, "the client is playing at DOUBLE the host's rate"),
-                        (0.5, "the client is playing at HALF the host's rate")):
+    # ⚠️ Say "rate mismatch", not "playing too fast": this same check runs on
+    # receive (what the speaker played) and on transmit (what reached the host),
+    # and naming one direction sends the search the wrong way in the other.
+    for factor, why in ((2.0, "a 2x rate mismatch - one end is using half the "
+                              "rate the other end is"),
+                        (0.5, "a 2x rate mismatch - one end is using double the "
+                              "rate the other end is")):
         if abs(hz - expect * factor) * 100.0 / expect < 12:
             hint = f" - {why}"
     print(f"FAIL: expected {expect} Hz, measured {hz} Hz ({off:.1f}% off){hint}")

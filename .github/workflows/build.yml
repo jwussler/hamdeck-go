@@ -79,7 +79,11 @@ jobs:
         if: matrix.deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+          # ⚠️ libasound2-dev is REQUIRED: SoLoud compiles its own ALSA backend and
+          # needs alsa/asoundlib.h. Without it the Linux panel fails at "Building
+          # native assets" while Windows and macOS build fine, so the gap only
+          # shows on the one platform this project develops on.
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libasound2-dev
       - name: Enable the desktop target
         working-directory: client
         run: flutter config --enable-${{ matrix.target }}-desktop

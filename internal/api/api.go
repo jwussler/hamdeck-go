@@ -38,8 +38,12 @@ type Server struct {
 	// The receiver, fanned out to whoever is listening.
 	Audio *audio.Stream
 	// The transmitter's audio, and the rig it routes into.
-	Tx  *audio.TxSink
-	Rig2 interface {
+	Tx *audio.TxSink
+	// ⚠️ A TEST INSTRUMENT, set only by --tx-record. When it is set the transmit
+	// socket works with no sound card at all, which is what lets a client's
+	// transmit path be proved on a machine that has no radio attached.
+	TxRec *audio.TxRecorder
+	Rig2  interface {
 		SetRemoteTX(bool) error
 		RemoteTXState() (bool, bool, error)
 		SetPTT(bool) error
@@ -312,7 +316,7 @@ func (s *Server) Handler() http.Handler {
 				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
 				return
 			}
-			if s.Tx == nil {
+			if s.Tx == nil && s.TxRec == nil {
 				writeJSON(w, 503, map[string]string{"status": "error",
 					"message": "this host has no transmit audio device"})
 				return
@@ -328,8 +332,14 @@ func (s *Server) Handler() http.Handler {
 			// a client that reused the receive rate for transmit would send a
 			// voice at half speed - transmitting fine, metering fine, and
 			// unintelligible to everyone except the operator.
+			txRate, txCh := 0, 0
+			if s.Tx != nil {
+				txRate, txCh = s.Tx.Rate(), s.Tx.Channels()
+			} else {
+				txRate, txCh = s.TxRec.Rate(), s.TxRec.Channels()
+			}
 			hello := fmt.Sprintf(`{"rate":%d,"channels":%d,"format":"s16le"}`,
-				s.Tx.Rate(), s.Tx.Channels())
+				txRate, txCh)
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(hello)); err != nil {
 				return
 			}
@@ -361,7 +371,12 @@ func (s *Server) Handler() http.Handler {
 					return
 				}
 				if typ == websocket.MessageBinary {
-					s.Tx.Write(data)
+					if s.Tx != nil {
+						s.Tx.Write(data)
+					}
+					if s.TxRec != nil {
+						s.TxRec.Write(data)
+					}
 				}
 			}
 		})
@@ -442,7 +457,6 @@ func logging(next http.Handler) http.Handler {
 		log.Printf("%s %s (%v)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 	})
 }
-
 
 // ⚠️ THE TRANSMIT SIDE REPORTS THE LEVEL THAT REACHED THE RADIO, and the frames
 // it could not play. A microphone that is muted, a browser that captured
