@@ -7,7 +7,7 @@ checklist this was built from.
 
 - **Station host**: VM 105 (`192.168.40.64`), `systemd` unit `hamdeck-go`,
   installed at `/opt/hamdeck-go`, credential in `/etc/hamdeck-go/env` (mode 600),
-  recordings in `/var/lib/hamdeck-go/recordings`. Version **0.4.1**.
+  recordings in `/var/lib/hamdeck-go/recordings`. Version **0.4.2**.
   ENABLED, so it comes back after a reboot.
 - **Panel**: served by the host itself at `/` from `/opt/hamdeck-go/panel`.
   The previous build is kept beside it as `panel.old` — swap the two
@@ -15,7 +15,22 @@ checklist this was built from.
   `bin/hamdeck-host.0.4.0.bak`.
 - **Radio**: `/dev/ttyRIG` at 38400, USB codec in at 22050 Hz / out at 44100 Hz.
 - **Tuner**: TG-XL at `192.168.40.51:9010`. **CAT proxy**: 127.0.0.1:4532.
-- **Login**: `admin` / `gotest` on `http://192.168.40.64:5102`. LAN only, no tunnel.
+- **The address**: **`https://radio.wa0o.com`** — the station's only URL. Caddy
+  on .60 proxies it to 192.168.40.64:5102 with the real wildcard cert. LAN/VPN
+  only, no tunnel. Login `admin` / `gotest`.
+
+⚠️ **ONE NAME. Moving the station means editing that `reverse_proxy` line, never
+adding a hostname.** `radio.wa0o.com` had been left pointing at the stopped C++
+host on :5002 — answering 502 — while the working station sat behind
+`radio-go.wa0o.com`, a name nobody asked for. Both `radio-go` and `radio-next`
+are deleted. Rollback to the C++ host is `:5002` on the same line.
+
+⚠️ **The panel implies https and takes no port.** `radio.wa0o.com` is the whole
+address; the port lives under ADVANCED, blank meaning standard. Defaulting to
+http is not merely untidy — getUserMedia is refused on a page that is not a
+secure context, so a panel reached over http can receive audio and can never
+transmit it, which presents as a broken microphone and is really a URL.
+`client/test/base_url_test.dart` holds the eight cases.
 
 ⚠️ **The service unit in `packaging/` IS the one the station runs** — copied to
 `/etc/systemd/system/hamdeck-go.service`, verified byte-identical. They had
@@ -24,13 +39,13 @@ so a reinstall from the .deb would have silently removed the CAT proxy.
 
 ## The gates — run these, do not reason about them
 
-    tools/check_auth.py http://192.168.40.64:5102 admin gotest
+    tools/check_auth.py https://radio.wa0o.com admin gotest
         every route needs a session except health and the login pair.
         The route list comes from the HOST, so a route added tomorrow is
         checked tomorrow. Safe against the station: every call is made
         WITHOUT a session, so a working route does nothing and answers 401.
 
-    tools/parity.py http://192.168.40.64:5102 admin gotest
+    tools/parity.py https://radio.wa0o.com admin gotest
         every C++ route has a Go route. READ-ONLY by default.
 
     tools/check_audio_roundtrip.sh client/build/linux/x64/release/bundle/hamdeck_panel
@@ -76,7 +91,7 @@ string only the new code has — that check can tell working from broken.
   stops.
 - **README and `serial.go`** no longer describe a read-only experiment that
   never opens a serial port. It runs the station; the C++ host is stopped.
-- **Packages rebuilt at 0.4.1**, the stale 0.2.0 pair deleted. Payload checked:
+- **Packages rebuilt at 0.4.2**, the stale 0.2.0 pair deleted. Payload checked:
   the keyboard work and both audio plugins are inside the panel .deb.
 
 ## What is not done
