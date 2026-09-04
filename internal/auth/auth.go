@@ -13,6 +13,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -118,4 +119,125 @@ func (s *Service) Valid(token string) bool {
 		return false
 	}
 	return true
+}
+
+// ── Session and user management ─────────────────────────────────────────────
+
+// Who returns the username behind a token, or "" if it is not a live session.
+func (s *Service) Who(token string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[token]
+	if !ok || time.Now().After(sess.expires) {
+		return ""
+	}
+	return sess.user
+}
+
+// Logout ends one session. ⚠️ It reports whether a session was actually ended:
+// "ok" for a token that was already gone tells an operator their session was
+// closed when nothing happened.
+func (s *Service) Logout(token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, existed := s.sessions[token]
+	delete(s.sessions, token)
+	return existed
+}
+
+// SessionInfo is one live session, for the admin page.
+//
+// ⚠️ NO TOKENS. A list of live sessions that carries the tokens is a list of
+// working credentials, and it would be rendered in a browser and copied into
+// support conversations. The id is a short prefix, enough to tell two sessions
+// apart and useless for logging in.
+type SessionInfo struct {
+	ID      string `json:"id"`
+	User    string `json:"user"`
+	Expires string `json:"expires"`
+	Minutes int    `json:"minutes_left"`
+}
+
+func (s *Service) Sessions() []SessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []SessionInfo{}
+	now := time.Now()
+	for tok, sess := range s.sessions {
+		if now.After(sess.expires) {
+			continue
+		}
+		out = append(out, SessionInfo{
+			ID:      tok[:8],
+			User:    sess.user,
+			Expires: sess.expires.Format("01/02/2006 15:04"),
+			Minutes: int(sess.expires.Sub(now).Minutes()),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].User < out[j].User })
+	return out
+}
+
+// Kick ends every session whose id prefix matches. Returns how many went.
+func (s *Service) Kick(idPrefix string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for tok := range s.sessions {
+		if strings.HasPrefix(tok, idPrefix) {
+			delete(s.sessions, tok)
+			n++
+		}
+	}
+	return n
+}
+
+func (s *Service) Users() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.users))
+	for u := range s.users {
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SetPassword changes an existing user's password.
+//
+// ⚠️ IT REFUSES TO CREATE ONE. "Change the password" quietly adding an account
+// that was never meant to exist is how a typo becomes a login.
+func (s *Service) SetPassword(name, hash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.users[name]; !ok {
+		return fmt.Errorf("there is no user called %q", name)
+	}
+	s.users[name] = hash
+	return nil
+}
+
+// RemoveUser deletes a user and ends their sessions.
+//
+// ⚠️ BOTH HALVES, ALWAYS. Removing the account and leaving the session alive
+// means a revoked user keeps working until their token expires - which is up to
+// eight hours of access that somebody believes they took away.
+func (s *Service) RemoveUser(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.users[name]; !ok {
+		return fmt.Errorf("there is no user called %q", name)
+	}
+	if len(s.users) == 1 {
+		// ⚠️ Never remove the last one. A host with no users cannot be logged
+		// into and cannot be fixed from the panel.
+		return fmt.Errorf("%q is the only user - removing it would lock everyone out", name)
+	}
+	delete(s.users, name)
+	for tok, sess := range s.sessions {
+		if sess.user == name {
+			delete(s.sessions, tok)
+		}
+	}
+	return nil
 }

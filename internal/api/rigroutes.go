@@ -138,7 +138,14 @@ func (s *Server) registerCAT(mux routeMux) {
 		"/api/tune": "AC002;",
 	}
 	for path, cat := range simple {
+		cat := cat
+		// ⚠️ THE RIG'S OWN ATU KEYS THE TRANSMITTER TOO. It is one CAT verb in a
+		// table of harmless ones, which is exactly how it would have been missed.
+		keysUp := path == "/api/tune"
 		s.catRoute(mux, path, func(_ string) ([]string, map[string]any, error) {
+			if keysUp && s.Lock != nil && s.Lock.On() {
+				return nil, nil, fmt.Errorf("transmit is locked down: %s", s.Lock.Reason())
+			}
 			return []string{cat}, nil, nil
 		})
 	}

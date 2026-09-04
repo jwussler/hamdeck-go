@@ -47,6 +47,9 @@ type Server struct {
 	// The receive recorder, or nil when the host has no audio.
 	Rec *audio.Recorder
 
+	// Transmit lockdown, enforced next to the radio; see admin.go.
+	Lock *Lockdown
+
 	// Settings the host remembers on the panel's behalf; see hostflags.go.
 	Flags *hostFlags
 
@@ -351,6 +354,11 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
 			return
 		}
+		if s.Lock != nil && s.Lock.On() {
+			writeJSON(w, 403, map[string]any{"status": "error", "lockdown": true,
+				"message": "transmit is locked down: " + s.Lock.Reason()})
+			return
+		}
 		if s.Rig2 == nil {
 			writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
 				"message": "this host has no radio that can be routed for remote transmit"})
@@ -401,6 +409,12 @@ func (s *Server) Handler() http.Handler {
 	set("/api/ptt/", func(a string) error {
 		switch a {
 		case "on":
+			// ⚠️ CHECKED HERE, NOT IN THE CLIENT. A lockdown the client enforces
+			// asks the misbehaving client to stop transmitting - which is the
+			// one program that has already shown it will not.
+			if s.Lock != nil && s.Lock.On() {
+				return fmt.Errorf("transmit is locked down: %s", s.Lock.Reason())
+			}
 			return s.Rig.SetPTT(true)
 		case "off":
 			return s.Rig.SetPTT(false)
@@ -436,6 +450,17 @@ func (s *Server) Handler() http.Handler {
 				"message":   "no tuner configured on this host"})
 			return
 		}
+		// ⚠️ THE TUNER KEYS THE TRANSMITTER, SO LOCKDOWN COVERS IT. This check
+		// was written once and silently landed on the wrong route, and the test
+		// caught the tuner happily answering "keying 15 W CW and tuning" while
+		// the station was locked down. A lockdown that stops PTT and leaves a
+		// button that puts a carrier on the air has not locked anything down.
+		if s.Lock != nil && s.Lock.On() {
+			writeJSON(w, 403, map[string]any{"status": "error", "lockdown": true,
+				"tuner": "tgxl", "tuning": false,
+				"message": "transmit is locked down: " + s.Lock.Reason()})
+			return
+		}
 		// ⚠️ Run it in the background and answer immediately. A tune takes 3-15
 		// seconds with a carrier on the air; a client waiting on the HTTP reply
 		// cannot show progress, and a client that gives up on the request does
@@ -454,6 +479,10 @@ func (s *Server) Handler() http.Handler {
 	if s.Flags == nil {
 		s.Flags = newHostFlags()
 	}
+	if s.Lock == nil {
+		s.Lock = &Lockdown{}
+	}
+	s.registerAdmin(mux)
 	s.registerHostFlags(mux)
 	s.registerCAT(mux)
 
@@ -503,6 +532,11 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/ws/tx", func(w http.ResponseWriter, r *http.Request) {
 			if !s.authed(r) {
 				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+				return
+			}
+			if s.Lock != nil && s.Lock.On() {
+				writeJSON(w, 403, map[string]any{"status": "error", "lockdown": true,
+					"message": "transmit is locked down: " + s.Lock.Reason()})
 				return
 			}
 			if s.Tx == nil && s.TxRec == nil {
