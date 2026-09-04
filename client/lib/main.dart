@@ -41,6 +41,7 @@ class _PanelState extends State<Panel> {
   List<MicDevice> _mics = const [];
   bool _tuning = false;
   Map<String, dynamic>? _meters;
+  Map<String, dynamic>? _rec;
   String _tunerMsg = '';
   DateTime? _lastGood;
 
@@ -118,9 +119,11 @@ class _PanelState extends State<Panel> {
       // actually knows rather than remembering what it did.
       final t = await _api!.send('/api/tune/tgxl/status');
       final m = await _api!.send('/api/meters');
+      final rc = await _api!.send('/api/record/status');
       if (!mounted) return;
       setState(() {
         if (m != null) _meters = m;
+        if (rc != null) _rec = rc;
         if (t != null) {
           _tuning = t['tuning'] == true;
           // ⚠️ Say WHEN the message is from. The host keeps the last tune's
@@ -397,6 +400,14 @@ class _PanelState extends State<Panel> {
       const SizedBox(height: 8),
             _keys('MODE', const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'],
                 (m) => '/api/mode/$m', selected: '${_rig?['mode']}'),
+            const SizedBox(height: 8),
+            _vfoRow(),
+            const SizedBox(height: 8),
+            _ritRow(),
+            const SizedBox(height: 8),
+            _rxRow(),
+            const SizedBox(height: 8),
+            _recRow(),
             const SizedBox(height: 10),
           ]),
         ),
@@ -705,6 +716,116 @@ class _PanelState extends State<Panel> {
       ]),
     );
   }
+
+
+  // ── VFO, RIT and the receiver controls ──────────────────────────────────
+  //
+  // ⚠️ ONE ROW PER JOB, and the row says what it does to the radio. The Qt
+  // client groups these the same way; a wall of undifferentiated buttons is how
+  // an operator hits "split" reaching for "swap".
+  Widget _vfoRow() => _group('VFO', [
+        _btn('A', () => _api!.send('/api/vfo/a')),
+        _btn('B', () => _api!.send('/api/vfo/b')),
+        _btn('SWAP', () => _api!.send('/api/vfo/swap')),
+        _btn('A→B', () => _api!.send('/api/vfo-copy/a2b')),
+        _btn('B→A', () => _api!.send('/api/vfo-copy/b2a')),
+        _btn('SPLIT', () => _api!.send('/api/split/toggle'),
+            on: _rig?['split'] == true),
+        _btn('LOCK', () => _api!.send('/api/toggle/lock'),
+            on: _rig?['vfo_locked'] == true),
+      ]);
+
+  Widget _ritRow() => _group('RIT  ·  TUNING STEP', [
+        _btn('RIT −', () => _api!.send('/api/rit/down')),
+        _btn('RIT +', () => _api!.send('/api/rit/up')),
+        _btn('CLEAR', () => _api!.send('/api/rit/clear')),
+        _btn('−1 kHz', () => _step(1000, 'down')),
+        _btn('+1 kHz', () => _step(1000, 'up')),
+        _btn('−100', () => _step(100, 'down')),
+        _btn('+100', () => _step(100, 'up')),
+      ]);
+
+  Widget _rxRow() => _group('RECEIVER', [
+        _btn('AGC', () => _api!.send('/api/agc/cycle')),
+        _btn('PREAMP', () => _api!.send('/api/preamp/cycle')),
+        _btn('ANT', () => _api!.send('/api/ant/toggle')),
+        _btn('NOTCH', () => _api!.send('/api/notch/toggle')),
+        _btn('NARROW', () => _api!.send('/api/width/narrow')),
+        _btn('MEDIUM', () => _api!.send('/api/width/medium')),
+        _btn('WIDE', () => _api!.send('/api/width/wide')),
+        _btn('VOL −', () => _api!.send('/api/volume/down')),
+        _btn('VOL +', () => _api!.send('/api/volume/up')),
+      ]);
+
+  Widget _recRow() {
+    final on = _rec?['recording'] == true;
+    final avail = _rec?['available'] == true;
+    return _group('RECORDING', [
+      _btn(on ? 'STOP' : 'RECORD',
+          avail ? () => _api!.send('/api/record/toggle') : null,
+          on: on),
+      _btn('SAVE LAST ${_rec?['replay_seconds'] ?? 0}s',
+          avail ? () => _api!.send('/api/record/replay') : null),
+    ], note: avail
+        ? (on ? 'recording · ${_rec?['seconds'] ?? 0}s' : (_rec?['message'] as String? ?? ''))
+        : (_rec?['message'] as String? ?? 'not available on this host'));
+  }
+
+  Future<void> _step(int hz, String dir) async {
+    await _api!.send('/api/step/$hz/$dir');
+    final s = await _api!.status();
+    if (mounted && s != null) setState(() => _rig = s);
+  }
+
+  Widget _group(String title, List<Widget> children, {String note = ''}) =>
+      Container(
+        margin: const EdgeInsets.symmetric(horizontal: 10),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+            color: T.panel,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: T.line)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Text(title, style: T.silk()),
+            const Spacer(),
+            if (note.isNotEmpty)
+              Text(note,
+                  style: const TextStyle(
+                      fontFamily: T.mono, fontSize: 10, color: T.dim)),
+          ]),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 8, children: children),
+        ]),
+      );
+
+  // ⚠️ A null onPressed DISABLES the button rather than hiding it. A control
+  // that vanishes when a feature is unavailable leaves the operator wondering
+  // whether they misremembered where it was.
+  // ⚠️ SIZED TO ITS TEXT, with a floor. A fixed 92 px broke "PREAMP" into
+  // "PREA MP" and "NOTCH" into "NOTC H" - a control panel whose labels are cut
+  // in half mid-word reads as broken before anybody presses anything, and the
+  // widths are not knowable in advance because they change with the label.
+  Widget _btn(String label, VoidCallback? tap, {bool on = false}) => ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 78, minHeight: 40, maxHeight: 40),
+        child: OutlinedButton(
+          style: OutlinedButton.styleFrom(
+              backgroundColor: on ? T.cyanFill : T.panelDeep,
+              foregroundColor: on ? T.cyan : T.text,
+              side: BorderSide(color: on ? T.cyan : T.line),
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5))),
+          onPressed: tap == null ? null : () async {
+            tap();
+            final s = await _api!.status();
+            if (mounted && s != null) setState(() => _rig = s);
+          },
+          child: Text(label,
+              maxLines: 1,
+              softWrap: false,
+              style: const TextStyle(letterSpacing: 0.6, fontSize: 12)),
+        ),
+      );
 
   Widget _keys(String title, List<String> labels, String Function(String) path,
       {String? selected}) {
