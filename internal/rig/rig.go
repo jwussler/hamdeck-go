@@ -29,23 +29,24 @@ import (
 //
 // So a field renamed here is a client broken there. This struct is a contract.
 type Snapshot struct {
-	Connected bool   `json:"connected"`
-	Freq      int64  `json:"freq"`
-	Mode      string `json:"mode"`
-	VFO       string `json:"vfo"`
-	PowerW    int    `json:"power"`
-	TX        bool   `json:"tx"`
-	SMeterRaw int    `json:"s_meter"`
-	SWRRaw    int    `json:"swr"`
-	ALCRaw    int    `json:"alc"`
-	FreqB     int64  `json:"freq_b"`
-	Split     bool   `json:"split"`
-	TxTimeout int    `json:"tx_timeout_in"`
-	FreqBuf   string `json:"freq_buffer"`
-	VFOLocked bool   `json:"vfo_locked"`
-	Diversity bool   `json:"diversity"`
-	AmpTuning bool   `json:"amp_tuning"`
-	TgxlTune  bool   `json:"tgxl_tuning"`
+	Connected   bool   `json:"connected"`
+	Freq        int64  `json:"freq"`
+	Mode        string `json:"mode"`
+	VFO         string `json:"vfo"`
+	PowerW      int    `json:"power"`
+	TX          bool   `json:"tx"`
+	SMeterRaw   int    `json:"s_meter"`
+	SWRRaw      int    `json:"swr"`
+	ALCRaw      int    `json:"alc"`
+	PowerMtrRaw int    `json:"power_mtr"`
+	FreqB       int64  `json:"freq_b"`
+	Split       bool   `json:"split"`
+	TxTimeout   int    `json:"tx_timeout_in"`
+	FreqBuf     string `json:"freq_buffer"`
+	VFOLocked   bool   `json:"vfo_locked"`
+	Diversity   bool   `json:"diversity"`
+	AmpTuning   bool   `json:"amp_tuning"`
+	TgxlTune    bool   `json:"tgxl_tuning"`
 	// ⚠️ How old this reading is. The C++ host learned the hard way that a stale
 	// cache looks exactly like a live one; the age travels WITH the data so a
 	// client cannot forget to ask.

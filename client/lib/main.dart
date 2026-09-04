@@ -40,6 +40,7 @@ class _PanelState extends State<Panel> {
   Timer? _poll;
   List<MicDevice> _mics = const [];
   bool _tuning = false;
+  Map<String, dynamic>? _meters;
   String _tunerMsg = '';
   DateTime? _lastGood;
 
@@ -102,6 +103,13 @@ class _PanelState extends State<Panel> {
     // the thing they came for is a menu, not a feature.
     _rx.start(api.base, api.token ?? '');
 
+    // ⚠️ AND THE MICROPHONE IS LISTED AND METERED IMMEDIATELY. This call was
+    // written and never wired up, so the picker only ever offered "system
+    // default" and the level bar never moved - which is precisely the fault it
+    // was written to catch. Nothing is transmitted and the radio is not touched;
+    // it just means a dead input is visible before it matters.
+    _loadMics();
+
     _poll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       final s = await _api!.status();
       // ⚠️ The tune state comes from the HOST, not from the button. The client
@@ -109,8 +117,10 @@ class _PanelState extends State<Panel> {
       // entirely, and the carrier is still on the air - so the panel asks who
       // actually knows rather than remembering what it did.
       final t = await _api!.send('/api/tune/tgxl/status');
+      final m = await _api!.send('/api/meters');
       if (!mounted) return;
       setState(() {
+        if (m != null) _meters = m;
         if (t != null) {
           _tuning = t['tuning'] == true;
           // ⚠️ Say WHEN the message is from. The host keeps the last tune's
@@ -505,30 +515,89 @@ class _PanelState extends State<Panel> {
       ]);
 
   Widget _meter() {
-    final raw = ((_rig?['s_meter'] as num?)?.toInt() ?? 0) / 255.0;
+    // ⚠️ THE S-METER IS NOT LINEAR AND S9 IS NOT TWO-THIRDS OF THE WAY UP. This
+    // drew raw/255, which is what the C++ host wrote down as wrong: raw 160 is
+    // S9 and the whole top third of the raw range is the 60 dB above it, so a
+    // genuine S9 sat at 63% and an S3 at a fifth. The bar now runs on the
+    // calibrated dB the host derives, and the number beside it is what an
+    // operator would actually say out loud.
+    final db = (_meters?['s_meter_db'] as num?)?.toInt();
+    final unit = _meters?['s_unit'] as String? ?? '';
+    final frac = db == null ? 0.0 : ((db + 60) / 120.0).clamp(0.0, 1.0);
+    final tx = _rig?['tx'] == true;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 10),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
           color: T.ground,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: T.line)),
+          border: Border.all(color: tx ? T.txRed : T.line)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('SIGNAL', style: T.silk()),
+        Row(children: [
+          Text(tx ? 'TRANSMIT' : 'SIGNAL', style: T.silk()),
+          const Spacer(),
+          // ⚠️ Blank, not "S0", when the host could not read the meter. An S0
+          // that was never measured looks exactly like a dead band.
+          Text(_stale || db == null ? '—' : unit,
+              style: TextStyle(
+                  fontFamily: T.mono,
+                  fontSize: 13,
+                  color: _stale ? T.amberDim : T.okGreen)),
+        ]),
         const SizedBox(height: 6),
         ClipRRect(
           borderRadius: BorderRadius.circular(3),
           child: LinearProgressIndicator(
-            value: _stale ? 0 : raw,
+            value: _stale ? 0 : frac,
             minHeight: 14,
             backgroundColor: T.panelDeep,
             valueColor: AlwaysStoppedAnimation(_stale ? T.amberDim : T.okGreen),
           ),
         ),
+        // ⚠️ THE TRANSMIT METERS ONLY EXIST WHILE KEYED. Drawing SWR while
+        // receiving shows a flat 1.0 as though it had been measured - a perfect
+        // match reported by a radio that is not transmitting.
+        if (tx) ...[
+          const SizedBox(height: 8),
+          Row(children: [
+            _txMeter('SWR',
+                (_meters?['swr_ratio'] as num?)?.toDouble().toStringAsFixed(1) ?? '—',
+                // SWR 1.0 is the left end and 5.0 the right; ?? binds looser
+                // than -, so the parentheses are load-bearing.
+                ((((_meters?['swr_ratio'] as num?)?.toDouble()) ?? 1.0) - 1.0) / 4.0),
+            const SizedBox(width: 10),
+            _txMeter('ALC', '${_meters?['alc_pct'] ?? '—'}%',
+                ((_meters?['alc_pct'] as num?)?.toDouble() ?? 0) / 100.0),
+            const SizedBox(width: 10),
+            _txMeter('PWR', '${_meters?['power_pct'] ?? '—'}%',
+                ((_meters?['power_pct'] as num?)?.toDouble() ?? 0) / 100.0),
+          ]),
+        ],
       ]),
     );
   }
 
+  Widget _txMeter(String label, String value, double frac) => Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Text(label, style: T.silk()),
+            const Spacer(),
+            Text(value,
+                style: const TextStyle(
+                    fontFamily: T.mono, fontSize: 11, color: T.amber)),
+          ]),
+          const SizedBox(height: 3),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            child: LinearProgressIndicator(
+              value: frac.clamp(0.0, 1.0),
+              minHeight: 8,
+              backgroundColor: T.panelDeep,
+              valueColor: const AlwaysStoppedAnimation(T.amber),
+            ),
+          ),
+        ]),
+      );
 
   // ⚠️ TWO TUNERS, NAMED. /api/tune is the rig's own ATU; the TG-XL is a separate
   // box on the network. The C++ host keeps them apart and makes each name itself

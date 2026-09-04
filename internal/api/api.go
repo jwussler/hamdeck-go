@@ -179,13 +179,31 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		snap := s.Rig.Snapshot()
+		// ⚠️ EVERY FIELD HERE IS DERIVED, NONE IS A PLACEHOLDER. This route used
+		// to answer power:0, power_pct:0, swr_ratio:1.0, s_meter_db:0 and an
+		// empty s_unit as literals - a perfect SWR and a dead power meter
+		// reported with the same confidence as the readings that were real. That
+		// is the exact fault the C++ host wrote down after a status route
+		// invented three fields and sent an evening of debugging to the wrong end
+		// of the chain. Each of these now comes off the radio through its own
+		// calibration curve, and the curves are not interchangeable.
+		db := rig.SMeterDb(snap.SMeterRaw)
 		writeJSON(w, 200, map[string]any{
-			"status": "ok", "s_meter": snap.SMeterRaw, "swr": snap.SWRRaw,
-			"alc": snap.ALCRaw, "power": 0,
+			"status": "ok",
+			// The raw readings, as the radio gave them.
+			"s_meter": snap.SMeterRaw, "swr": snap.SWRRaw,
+			"alc": snap.ALCRaw, "power": snap.PowerMtrRaw,
 			// ⚠️ The derived values carry their unit IN THE NAME, so no client can
 			// mistake a percentage for watts - the C++ host's rule, kept.
-			"alc_pct": snap.ALCRaw * 100 / 64, "power_pct": 0,
-			"swr_ratio": 1.0, "s_meter_db": 0, "s_unit": "",
+			"s_meter_db": db,
+			"s_unit":     rig.SUnit(db),
+			"swr_ratio":  rig.SWRRatio(snap.SWRRaw),
+			"alc_pct":    rig.ALCPercent(snap.ALCRaw),
+			"power_pct":  rig.PowerMeterPercent(snap.PowerMtrRaw),
+			// ⚠️ The transmit meters mean nothing while receiving, and a client
+			// that draws them anyway shows a flat SWR of 1.0 as though it had
+			// been measured. Say which readings are live.
+			"tx": snap.TX,
 		})
 	})
 

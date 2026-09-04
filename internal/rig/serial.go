@@ -117,6 +117,15 @@ func (s *Serial) pollOnce() {
 	pwr, perr := s.ask("PC;")   // power setting, 3 digits at offset 2
 	tx, terr := s.ask("TX;")    // transmit flag, 1 char at offset 2
 
+	// ⚠️ THE TRANSMIT METERS, AND THEY ONLY MEAN ANYTHING WHILE KEYED. They were
+	// never read at all before, so swr, alc and the power meter were reported as
+	// a confident 0 through a keyed carrier - which on the one screen an
+	// operator checks after tuning is exactly the wrong number to invent.
+	// RM4/RM5/RM6 answer THREE digits at offset 3, like SM0 and unlike PC.
+	alc, aerr := s.ask("RM4;")
+	pmtr, pmerr := s.ask("RM5;")
+	swr, swerr := s.ask("RM6;")
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -152,6 +161,22 @@ func (s *Serial) pollOnce() {
 	// certain of is the one that says whether it is transmitting.
 	if terr == nil && strings.HasPrefix(tx, "TX") && len(tx) >= 3 {
 		s.snap.TX = tx[2] != '0'
+	}
+	for _, m := range []struct {
+		reply  string
+		err    error
+		prefix string
+		into   *int
+	}{
+		{alc, aerr, "RM4", &s.snap.ALCRaw},
+		{pmtr, pmerr, "RM5", &s.snap.PowerMtrRaw},
+		{swr, swerr, "RM6", &s.snap.SWRRaw},
+	} {
+		if m.err == nil && strings.HasPrefix(m.reply, m.prefix) && len(m.reply) >= 6 {
+			if raw, err := strconv.Atoi(m.reply[3:6]); err == nil {
+				*m.into = raw
+			}
+		}
 	}
 	if ok {
 		s.lastOK = time.Now()
