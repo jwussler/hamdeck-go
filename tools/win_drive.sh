@@ -285,7 +285,13 @@ echo "== press the key AT THE KEYBOARD, the way a footswitch would"
 # The polling path does not vary by key - same watcher, same table, only the
 # virtual-key constant differs - so pressing a key the emulated keyboard CAN
 # deliver proves the mechanism. F13 stays the crash test above.
-WIN_FIND_LAST=1 choose "commonly bound" "F12" && ok "switched to F12, which this keyboard can actually send" \
+# ⚠️ VERIFIED ON WORDING TOO, not just on the number. The row is FOUND by
+# wording because tesseract reads this UI's digits badly, and then the same
+# weakness bit the verify step: the KEY field reads back as "Fi2" or "F1i2"
+# often enough that matching "F12" failed on a selection that had worked.
+# Landing on F9 instead is the only other way to see "commonly bound", and
+# the press test below would then fail honestly - it is the real gate.
+WIN_FIND_LAST=1 choose "commonly bound" "commonly bound" && ok "switched to a key this keyboard can actually send" \
     || fail "could not select F12 - the press below proves nothing"
 BEFORE=$(wc -l < /tmp/windrive-host.log)
 key "f12" 2; key "f12" 2; key "f12" 2
