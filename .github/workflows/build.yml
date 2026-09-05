@@ -143,16 +143,23 @@ jobs:
           #
           # App-local deployment is Microsoft's own sanctioned option and it
           # keeps the installer a per-user one with no elevation prompt.
-          $vc = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse `
-                  -Filter "vcruntime140.dll" -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -match "x64" } |
-                Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $vc) { throw "no Visual C++ runtime found on the runner to ship with the app" }
-          foreach ($d in @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) {
-            $from = Join-Path $vc.DirectoryName $d
-            if (-not (Test-Path $from)) { throw "the runner has no $d beside $($vc.FullName)" }
-            Copy-Item $from (Join-Path $src $d) -Force
-          }
+          # ⚠️ THE FOLDER MUST HAVE ALL THREE. The first attempt took the first
+          # vcruntime140.dll it found anywhere under Visual Studio and landed in
+          # the COMPILER's host-tools directory (bin\Hostx86\x64), which ships
+          # vcruntime140.dll and no vcruntime140_1.dll - so the build failed on
+          # the second file with a path that looked perfectly plausible. The
+          # redistributable lives under VC\Redist\MSVC\<ver>\x64\...CRT, and
+          # the honest test is not the name of the folder but whether all three
+          # files are in it.
+          $need = @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")
+          $vcDir = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Directory `
+                     -Filter "*CRT" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match "\\Redist\\" -and $_.FullName -match "\\x64\\" } |
+                   Where-Object { $dir = $_.FullName; ($need | Where-Object { Test-Path (Join-Path $dir $_) }).Count -eq 3 } |
+                   Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $vcDir) { throw "no folder on this runner holds all three C++ runtime DLLs" }
+          Write-Host "shipping the C++ runtime from $($vcDir.FullName)"
+          foreach ($d in $need) { Copy-Item (Join-Path $vcDir.FullName $d) (Join-Path $src $d) -Force }
           # ⚠️ CHECK THE PAYLOAD BEFORE PACKAGING IT. Without the two native
           # audio plugins the panel installs, starts, connects and is silent in
           # both directions - which is far worse than failing to start, because

@@ -27,6 +27,47 @@ KEY="${WIN_TEST_KEY:-$HOME/.ssh/vm_admin}"
 SSH="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $VM_USER@$VM_HOST"
 OUT="${2:-/tmp/win-test}"
 mkdir -p "$OUT"
+VMID="${WIN_TEST_VMID:-109}"
+PVE="${WIN_TEST_PVE:-pve}"
+# Leave it as we found it: a test rig that quietly stays powered on is 8 GB of
+# somebody else's memory for the rest of the week.
+WAS_OFF=0
+
+# ⚠️ THE BOX LIVES POWERED OFF. Joe: "keep the windows desktop but it could be
+# powerd down or off and when we start to test stuff we can turn it on." So this
+# starts it, waits for SSH to actually answer - not for the VM to report
+# "running", which happens a full minute before Windows will talk to anyone -
+# and shuts it down again afterwards if it started it.
+start_vm() {
+    if ssh "$PVE" "qm status $VMID" 2>/dev/null | grep -q running; then
+        echo "== the Windows box is already on"
+        return 0
+    fi
+    WAS_OFF=1
+    echo "== powering the Windows box on"
+    ssh "$PVE" "qm start $VMID" >/dev/null 2>&1
+    for i in $(seq 1 60); do
+        if timeout 3 bash -c "echo > /dev/tcp/$VM_HOST/22" 2>/dev/null; then
+            echo "   ssh answered after $((i * 5))s"
+            return 0
+        fi
+        sleep 5
+    done
+    echo "   FAIL  it never answered on ssh"
+    exit 1
+}
+
+stop_vm() {
+    [ "$WAS_OFF" -eq 1 ] || { echo "== leaving it on, it was on when we arrived"; return 0; }
+    echo "== powering it back off"
+    # ⚠️ A CLEAN SHUTDOWN, not qm stop. Pulling the power on Windows leaves it
+    # repairing itself on the next boot, which turns a two minute test into ten.
+    ssh "$PVE" "qm shutdown $VMID --timeout 120" >/dev/null 2>&1 || \
+        ssh "$PVE" "qm stop $VMID" >/dev/null 2>&1
+}
+trap stop_vm EXIT
+
+start_vm
 
 fail() { echo "  FAIL  $1"; FAILED=1; }
 ok()   { echo "  ok    $1"; }
