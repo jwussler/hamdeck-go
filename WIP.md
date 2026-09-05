@@ -64,9 +64,28 @@ panel survives being given F13 and that the key reaches the host.
 first real connection from a Windows install. Operating surface renders: 40M
 LSB, meter, link 0 ms.
 
-### Also
-- The surface scrolls but had **no scrollbar**, so a card sliced at the viewport
-  edge read as broken. `Scrollbar(thumbVisibility: true)` on a shared controller.
+### The operating surface really was cutting controls off
+Reported as "the panel just stops" - MON, COMP, ATU and THIS STATION sliced at
+the bottom edge with no way to reach them. Two separate faults, both found by
+rendering it rather than reasoning about it:
+
+- ⚠️ **`IntrinsicHeight` under-reported the row height**, so the surface was
+  forced to the viewport and the cards **clipped internally instead of
+  scrolling**. Removing it (columns size to their content now, `minHeight` still
+  fills a short window) makes the scroll view actually scroll.
+- ⚠️ **The scrollbar was being painted at rgb(15,17,20) on a rgb(14,16,19)
+  ground** - one value of difference, completely invisible. Material's default
+  scrollbar assumes a light theme and this app has never had one. Now themed
+  explicitly in `HamDeckApp`.
+
+I spent an hour chasing a layout bug that did not exist because of the second
+one. **Check whether a control is invisible before concluding it is absent.**
+
+⚠️ **Cutting the web to admin-only broke both test tools**, which drive the panel
+through a web build: `shoot_panel.py` silently photographed the admin page, and
+`panel_e2e.py` reported that no control reached the radio - because it was
+pressing keyboard shortcuts at a page that has none. Both point at
+`client/build/web-shoot` now, and preflight builds it.
 
 ### The Windows drive now asserts what is on the screen
 Two false results had to be beaten out of the harness before any of the above

@@ -139,51 +139,68 @@ echo "== assign F13 - THE ACTION THAT KILLED THE APP"
 # given something else. Clicking by coordinate is the only option available, so
 # the outcome gets OCR'd off the screen and the step fails if it is wrong.
 KEY_FIELD="30 300 660 345"          # the KEY row of the PUSH TO TALK card
-ROW0=320                            # the selected row sits level with the button
-ROWH=48
+# ⚠️ The whole window, not just below the field. The menu is positioned so the
+# SELECTED row lands on the button, which puts every earlier row ABOVE it - with
+# Pause selected, F13 sat at y=177 and a search that started at y=250 declared it
+# missing.
+MENU="100 60 1250 790"
 
+# ⚠️ AND IT CONFIRMS THE MENU IS ACTUALLY OPEN. The first click on an unfocused
+# window only activates it, so one click opens nothing - and searching a menu
+# that never opened reports "could not select F13" about a panel that is fine.
 open_key_menu() {
-    bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
-    sleep 1
-    bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
-    sleep 1.5
-}
-
-# choose <index-of-wanted> <index-of-currently-selected> <text that must appear>
-choose() {
-    local want="$1" have="$2" expect="$3" y try
-    for try in 1 2; do
-        open_key_menu
-        y=$(( ROW0 + ROWH * (want - have) ))
-        bash "$(dirname "$0")/win_click.sh" "click 300,$y" >/dev/null 2>&1
-        sleep 2
-        if bash "$(dirname "$0")/win_read.sh" $KEY_FIELD | grep -qi "$expect"; then
-            return 0
-        fi
-        # ⚠️ A failed attempt may have selected something else, which moves every
-        # row again. Re-read where we are before trying once more.
-        have=$(bash "$(dirname "$0")/win_read.sh" $KEY_FIELD)
-        case "$have" in
-            *Off*) have=0 ;; *F13*) have=1 ;; *F14*) have=2 ;; *F15*) have=3 ;;
-            *Pause*) have=4 ;; *ScrollLock*) have=5 ;; *F9*) have=6 ;; *F12*) have=7 ;;
-            *) have=0 ;;
-        esac
+    local i
+    for i in 1 2 3; do
+        bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
+        sleep 1.5
+        bash "$(dirname "$0")/win_find.sh" "no system-wide key" $MENU >/dev/null && return 0
     done
     return 1
 }
 
-# The chooser order: Off F13 F14 F15 Pause ScrollLock F9 F12
-CUR=$(bash "$(dirname "$0")/win_read.sh" $KEY_FIELD)
-case "$CUR" in
-    *Off*) CUR=0 ;; *F13*) CUR=1 ;; *F14*) CUR=2 ;; *F15*) CUR=3 ;;
-    *Pause*) CUR=4 ;; *ScrollLock*) CUR=5 ;; *F9*) CUR=6 ;; *F12*) CUR=7 ;; *) CUR=0 ;;
-esac
-choose 1 "$CUR" "F13" && ok "F13 is the selected key (read off the screen, not assumed)" \
-    || fail "could not select F13 in the chooser - the rest of this step proves nothing"
-sleep 2
-ALIVE=$($SSH 'powershell -NoProfile -Command "(Get-Process hamdeck_panel -ErrorAction SilentlyContinue | Measure-Object).Count"' 2>/dev/null | tr -dc '0-9')
-[ "${ALIVE:-0}" = "1" ] && ok "the panel survived being given F13" \
-    || fail "THE PANEL DIED CHOOSING F13 - the crash is back"
+# choose <regex matching the menu row> <regex the KEY field must then show>
+#
+# ⚠️ THE ROW IS FOUND, NOT CALCULATED. Flutter aligns the SELECTED row with the
+# button and clamps the menu at the screen edge, so a row's absolute position
+# depends on what is already chosen: one run clicked "Pause" while reporting it
+# had chosen F13, and the next missed the menu entirely because the previous
+# session had left F12 selected. Both were green-ish. Read the screen.
+choose() {
+    local row="$1" want="$2" try xy
+    for try in 1 2 3; do
+        open_key_menu || { key "esc" 1; continue; }
+        # ⚠️ SCROLL THE MENU TO THE TOP BEFORE LOOKING. The menu is itself a
+        # scroll view positioned on the SELECTED row, so with Pause chosen the
+        # F13 row was not merely off to one side - it was not rendered at all,
+        # and searching for it reported it missing from a chooser that has it.
+        # Eight Ups is more than the list is long; the highlight stops at the top.
+        local u
+        for u in 1 2 3 4 5 6 7 8; do key "up" 0.15; done
+        # While the menu is open it covers the KEY field, so a match in this
+        # region is a menu row and not the field showing the current value.
+        if xy=$(bash "$(dirname "$0")/win_find.sh" "$row" $MENU); then
+            bash "$(dirname "$0")/win_click.sh" "click ${xy% *},${xy#* }" >/dev/null 2>&1
+            sleep 2
+            bash "$(dirname "$0")/win_read.sh" $KEY_FIELD | grep -qE "$want" && return 0
+        else
+            # Menu did not open, or opened somewhere unexpected. Close it and retry.
+            key "esc" 1
+        fi
+    done
+    return 1
+}
+
+if choose "F13.*nothing else" "F13"; then
+    ok "F13 is the selected key, read back off the screen"
+    ALIVE=$($SSH 'powershell -NoProfile -Command "(Get-Process hamdeck_panel -ErrorAction SilentlyContinue | Measure-Object).Count"' 2>/dev/null | tr -dc '0-9')
+    [ "${ALIVE:-0}" = "1" ] && ok "the panel survived being given F13" \
+        || fail "THE PANEL DIED CHOOSING F13 - the crash is back"
+else
+    # ⚠️ NOT "the panel survived". If F13 was never selected, the crash was never
+    # exercised and saying anything about it would be the false pass this whole
+    # file was rewritten to stop.
+    fail "could not select F13 in the chooser - the crash test did NOT run"
+fi
 shot "05-f13-assigned"
 
 echo "== press the key AT THE KEYBOARD, the way a footswitch would"
@@ -198,7 +215,7 @@ echo "== press the key AT THE KEYBOARD, the way a footswitch would"
 # The polling path does not vary by key - same watcher, same table, only the
 # virtual-key constant differs - so pressing a key the emulated keyboard CAN
 # deliver proves the mechanism. F13 stays the crash test above.
-choose 7 1 "F12" && ok "switched to F12, which this keyboard can actually send" \
+choose "F12.*commonly bound" "F12" && ok "switched to F12, which this keyboard can actually send" \
     || fail "could not select F12 - the press below proves nothing"
 BEFORE=$(wc -l < /tmp/windrive-host.log)
 key "f12" 2; key "f12" 2; key "f12" 2

@@ -66,7 +66,24 @@ class HamDeckApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'HamDeck',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(scaffoldBackgroundColor: T.ground, useMaterial3: true),
+        theme: ThemeData(
+          scaffoldBackgroundColor: T.ground,
+          useMaterial3: true,
+          // ⚠️ THE SCROLLBAR NEEDS AN EXPLICIT COLOUR OR IT IS INVISIBLE HERE.
+          // The operating surface was scrolling correctly the whole time and the
+          // thumb was being painted at rgb(15,17,20) on a rgb(14,16,19) ground -
+          // one value of difference. It cost an hour chasing a layout bug that
+          // did not exist, and to an operator it reads as "the panel just cuts
+          // off": no cue at all that MON, COMP, ATU and the rest are reachable
+          // below the fold. Material's default scrollbar assumes a light theme
+          // and this app has never had one.
+          scrollbarTheme: ScrollbarThemeData(
+            thumbColor: WidgetStateProperty.resolveWith(
+                (st) => st.contains(WidgetState.hovered) ? T.dim : T.line),
+            thickness: WidgetStateProperty.all(8),
+            radius: const Radius.circular(4),
+          ),
+        ),
         home: const Panel(),
       );
 }
@@ -806,12 +823,12 @@ class _PanelState extends State<Panel> with WindowListener {
               return Scrollbar(
                 controller: _surfaceScroll,
                 thumbVisibility: true,
+                // The thumb's colour comes from scrollbarTheme - see HamDeckApp.
                 child: SingleChildScrollView(
                   controller: _surfaceScroll,
                   child: ConstrainedBox(
                     constraints: BoxConstraints(minHeight: box.maxHeight),
-                    child: IntrinsicHeight(
-                        child: _surface == 0 ? _operate() : _setup()),
+                    child: _surface == 0 ? _operate() : _setup(),
                   ),
                 ),
               );
@@ -1102,7 +1119,7 @@ class _PanelState extends State<Panel> with WindowListener {
         if (columns == 3) {
           return Padding(
             padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Expanded(flex: 135, child: a),
               const SizedBox(width: 10),
               Expanded(flex: 100, child: b),
@@ -1114,7 +1131,7 @@ class _PanelState extends State<Panel> with WindowListener {
         if (columns == 2) {
           return Padding(
             padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Expanded(child: a),
               const SizedBox(width: 10),
               Expanded(child: Column(children: [b, const SizedBox(height: 10), c])),

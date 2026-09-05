@@ -25,7 +25,11 @@ import urllib.request
 import websocket
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PANEL = os.path.join(ROOT, "client", "build", "web")
+# ⚠️ NOT client/build/web. That bundle is the ADMIN page - a browser has no
+# operating surface on purpose - so driving it here checked keyboard shortcuts
+# against a page that has none, and reported the rig unreachable. This needs the
+# build made with --dart-define=HAMDECK_SHOOT=true, which is never served.
+PANEL = os.path.join(ROOT, "client", "build", "web-shoot")
 HOST = os.path.join(ROOT, "hamdeck-host")
 PORT, CTRL, CDP = 5913, 5912, 9313
 USER, PASSWORD = "e2e", "e2e-only"
