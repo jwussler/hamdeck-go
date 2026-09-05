@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Photograph the panel in every state that matters, against a simulated rig.
 
+⚠️ CHECKING A BUILT PANEL FOR A STRING NEEDS BOTH ENCODINGS. Dart stores a
+string as one byte per character only while every character fits in Latin-1; one
+em dash makes the whole string UTF-16 in the snapshot, and an ASCII grep then
+reports a feature as MISSING from a build that contains it. See payload_has().
+
 ⚠️ LOOK AT IT BEFORE SHIPPING IT. Geometry, overlap, hierarchy and "does this
 read at a glance" are not things to reason about - they are things to render and
 inspect. The transmit bar covering the RIT controls during a tune survived
@@ -51,6 +56,19 @@ SHOTS = [
     ("operate-1100x800", (1100, 800), False, False),
     ("operate-760x900", (760, 900), False, False),
 ]
+
+
+def payload_has(path, text):
+    """Is this string in a built Flutter payload?
+
+    ⚠️ BOTH ENCODINGS, ALWAYS. An ASCII-only grep said the whole global-PTT
+    status machinery was absent from an installer that had it - because those
+    strings contain an em dash, which pushes them to UTF-16 in the snapshot.
+    A payload check that reports a present feature as missing gets ignored the
+    third time it cries wolf.
+    """
+    blob = open(path, "rb").read()
+    return blob.count(text.encode()) + blob.count(text.encode("utf-16-le"))
 
 
 def api(token, path):
