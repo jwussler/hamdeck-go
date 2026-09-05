@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Publish a release to PUBLIC GitHub. Nothing else ever pushes there.
 #
-# ⚠️ GITHUB IS A PUBLISH TARGET, NOT THE ORIGIN. Day to day this repo pushes to
-# git.wa0o.com and nowhere else: development happens in private and the public
-# history shows releases, not every experiment. That is the whole reason the
-# local origin exists, so this is the ONLY script allowed to push to `public`.
-#
-# ⚠️ AND IT IS NOT A BACKUP. Between releases GitHub can be weeks behind. The
-# backup is /opt/docker/forgejo/backup.sh - shack, then the NAS, then S3.
+# ⚠️ WHAT THIS ADDS IS THE TAG, NOT THE CODE. Ordinary commits already reach both
+# git.wa0o.com and GitHub - `origin` has two push URLs - so the history is never
+# behind. What a release does is TAG it, and the tag is what triggers the
+# installer build on GitHub. Pushes without a tag cost nothing: CI there triggers
+# on `v*` only, which is what stopped a private repo eating its whole month of
+# Actions minutes by the 5th.
 #
 #   tools/release.sh v0.8.0 "what changed"
 set -euo pipefail
@@ -41,9 +40,13 @@ echo
 read -r -p "publish the above to PUBLIC GitHub as $TAG? [y/N] " ok
 [ "$ok" = "y" ] || { echo "nothing published"; exit 1; }
 
+# ⚠️ ONE PUSH, TWO DESTINATIONS. `origin` fans out to git.wa0o.com AND GitHub -
+# see `git remote -v`. Every ordinary commit already reaches both, so GitHub is a
+# continuous off-site copy rather than something weeks stale between releases.
+# Pushing the TAG is what starts the installer build over there; ordinary pushes
+# carry no tag and cost nothing.
 git tag -a "$TAG" -m "$MSG"
-git push origin main --tags          # the private origin first, always
-git push public main --tags          # then the world
+git push origin main --tags
 echo
 echo "published $TAG to github.com/jwussler/hamdeck-go"
 echo "CI there builds the installers; the local runner has already checked every commit."
