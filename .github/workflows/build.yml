@@ -40,21 +40,19 @@ jobs:
         run: python3 tools/check_branding.py
       - uses: actions/setup-go@v5
         with: { go-version: '1.23', cache: true }
-      # ⚠️ THE SERVER PACKAGES ONLY, AND NOT ./... - the Gio comparison panel
-      # imports Gio, which needs X11, Wayland and xkbcommon HEADERS to even
-      # type-check on Linux. Vetting everything made the server's own gate depend
-      # on desktop GUI libraries the server will never use, and it failed for a
+      # ⚠️ ./... IS SAFE AGAIN. This was pinned to the server packages because
+      # the Gio comparison panel imported Gio, which needs X11, Wayland and
+      # xkbcommon HEADERS to even type-check on Linux - so the server's own gate
+      # depended on desktop GUI libraries the server will never use, and failed for a
       # reason that had nothing to do with the server.
       - name: Vet
-        run: go vet ./cmd/hamdeck-host/... ./internal/...
+        run: go vet ./...
       - name: Test
-        run: go test ./cmd/hamdeck-host/... ./internal/...
+        run: go test ./...
 
       # The Gio panel is kept as a comparison; WASM needs no system libraries, so
       # this proves it still compiles without dragging GUI headers into the
       # server's gate.
-      - name: The comparison panel still builds (wasm)
-        run: GOOS=js GOARCH=wasm go build -o /dev/null ./cmd/hamdeck-panel
       - name: Build
         run: go build -ldflags "-X main.version=${GITHUB_REF_NAME#v}" ./cmd/hamdeck-host
       # ⚠️ RUN IT, not just build it. A host that compiles and exits on start is a
