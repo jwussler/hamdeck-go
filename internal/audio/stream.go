@@ -31,6 +31,40 @@ type Stream struct {
 	running bool
 	desc    string
 	rec     *Recorder
+
+	// ⚠️ CAPTURE IS SUPERVISED, NOT FIRE-AND-FORGET. The read loop used to log
+	// "capture stopped" once and return forever. Control, metering and transmit
+	// all kept working, so from the operator's side receive audio simply went
+	// quiet with no error and no clue - twice in two days on this station, both
+	// times an EIO out of the USB codec, once at 371 ms and once at 23 ms, so it
+	// is the device and not the buffer size. The only fix that helps an operator
+	// mid-net is to open it again.
+	open     openFunc
+	match    string
+	forced   int
+	failures int   // consecutive reopen failures, 0 while healthy
+	lastErr  error // why capture last dropped, for Describe()
+	stop     chan struct{}
+}
+
+// captureDev is what the read loop needs from a sound card, and no more - so a
+// test can hand it a device that fails on demand. A recovery path that has never
+// been watched to recover is a hope, not a fix.
+type captureDev interface {
+	Read([]byte) error
+	Close()
+}
+
+// openFunc opens capture at a requested size: device, rate, channels, frames,
+// bytes-per-frame.
+type openFunc func(match string, wantFrames int) (captureDev, int, int, int, int, error)
+
+func alsaOpen(match string, wantFrames int) (captureDev, int, int, int, int, error) {
+	d, rate, ch, frames, err := tryOpen(match, wantFrames)
+	if err != nil {
+		return nil, 0, 0, 0, 0, err
+	}
+	return d, rate, ch, frames, d.BytesPerFrame(), nil
 }
 
 type client struct {
@@ -39,13 +73,26 @@ type client struct {
 }
 
 func NewStream() *Stream {
-	return &Stream{clients: map[*client]struct{}{}, Rate: 22050, Channels: 1}
+	return &Stream{clients: map[*client]struct{}{}, Rate: 22050, Channels: 1,
+		open: alsaOpen, stop: make(chan struct{})}
+}
+
+// Running reports whether capture is actually flowing right now.
+func (s *Stream) Running() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.running
 }
 
 func (s *Stream) Describe() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.running {
+		if s.lastErr != nil {
+			// ⚠️ SAY IT. Silent receive audio with a healthy-looking panel is
+			// the failure this whole change is about.
+			return fmt.Sprintf("capture down, reopening (%d attempts): %v", s.failures, s.lastErr)
+		}
 		return "not started"
 	}
 	return s.desc
@@ -105,18 +152,17 @@ func (s *Stream) StartSized(match string, forced int) error {
 	if forced > 0 {
 		sizes = append([]int{forced}, sizes...)
 	}
+	s.mu.Lock()
+	s.match, s.forced = match, forced
+	s.mu.Unlock()
 	for _, want := range sizes {
-		d, rate, ch, frames, err := tryOpen(match, want)
+		d, rate, ch, frames, bpf, err := s.open(match, want)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		s.mu.Lock()
-		s.Rate, s.Channels, s.running = rate, ch, true
-		s.desc = fmt.Sprintf("alsa @ %d Hz %dch S16_LE, %d frame chunks (%d ms)",
-			rate, ch, frames, frames*1000/rate)
-		s.mu.Unlock()
-		go s.readLoop(d, frames*d.BytesPerFrame())
+		s.adopt(d, rate, ch, frames, bpf)
+		go s.supervise(d, frames*bpf)
 		return nil
 	}
 	if lastErr == nil {
@@ -235,18 +281,118 @@ func tryOpen(match string, wantFrames int) (*alsa.Device, int, int, int, error) 
 	return nil, 0, 0, 0, fmt.Errorf("no capture device matching %q", match)
 }
 
-func (s *Stream) readLoop(d *alsa.Device, chunkBytes int) {
+func (s *Stream) adopt(d captureDev, rate, ch, frames, bpf int) {
+	s.mu.Lock()
+	s.Rate, s.Channels, s.running = rate, ch, true
+	s.failures, s.lastErr = 0, nil
+	s.desc = fmt.Sprintf("alsa @ %d Hz %dch S16_LE, %d frame chunks (%d ms)",
+		rate, ch, frames, frames*1000/rate)
+	s.mu.Unlock()
+}
+
+// supervise reads until the device fails, then opens it again.
+//
+// ⚠️ THIS REPLACES A READ LOOP THAT GAVE UP. It logged "capture stopped" once
+// and returned, leaving a host that answered every route, metered, tuned and
+// transmitted perfectly while the operator heard nothing and was told nothing.
+// The recovery is deliberately dumb - close, wait, walk the same size ladder
+// again - because the fault is in the USB codec and the only thing that has ever
+// fixed it is opening it afresh.
+//
+// ⚠️ The wait backs off but is CAPPED LOW. This runs while somebody is waiting
+// to hear the band, so a minute of exponential politeness is worse than a
+// pointless retry; it settles at 5 s and keeps trying for as long as the host
+// runs. Never give up on the receiver.
+func (s *Stream) supervise(d captureDev, chunkBytes int) {
+	for {
+		s.readUntilError(d, chunkBytes)
+		d.Close()
+
+		select {
+		case <-s.stop:
+			return
+		default:
+		}
+
+		s.mu.Lock()
+		s.running = false
+		fails := s.failures
+		match, forced := s.match, s.forced
+		s.mu.Unlock()
+
+		wait := time.Duration(1<<min(fails, 2)) * time.Second // 1s, 2s, 4s, then 5s
+		if wait > 5*time.Second {
+			wait = 5 * time.Second
+		}
+		select {
+		case <-s.stop:
+			return
+		case <-time.After(wait):
+		}
+
+		nd, rate, ch, frames, bpf, err := s.reopen(match, forced)
+		if err != nil {
+			s.mu.Lock()
+			s.failures++
+			s.lastErr = err
+			n := s.failures
+			s.mu.Unlock()
+			// ⚠️ Not every attempt: a codec unplugged overnight would fill the
+			// journal. Loud at first, then once a minute-ish.
+			if n <= 3 || n%12 == 0 {
+				log.Printf("audio: capture still down after %d attempts: %v", n, err)
+			}
+			continue
+		}
+		log.Printf("audio: capture recovered after %d attempts", s.failures+1)
+		s.adopt(nd, rate, ch, frames, bpf)
+		d, chunkBytes = nd, frames*bpf
+	}
+}
+
+// reopen walks the same ladder StartSized does, so a device that comes back only
+// at a different size still comes back.
+func (s *Stream) reopen(match string, forced int) (captureDev, int, int, int, int, error) {
+	sizes := []int{512, 1024, 2048, 4096, 8192, 16384}
+	if forced > 0 {
+		sizes = append([]int{forced}, sizes...)
+	}
+	var lastErr error
+	for _, want := range sizes {
+		d, rate, ch, frames, bpf, err := s.open(match, want)
+		if err == nil {
+			return d, rate, ch, frames, bpf, nil
+		}
+		lastErr = err
+	}
+	return nil, 0, 0, 0, 0, lastErr
+}
+
+func (s *Stream) readUntilError(d captureDev, chunkBytes int) {
 	buf := make([]byte, chunkBytes)
 	for {
 		if err := d.Read(buf); err != nil {
-			log.Printf("audio: capture stopped: %v", err)
+			log.Printf("audio: capture dropped, will reopen: %v", err)
 			s.mu.Lock()
-			s.running = false
+			s.lastErr = err
 			s.mu.Unlock()
 			return
 		}
 		s.publish(buf)
 	}
+}
+
+// Stop ends supervision. Without it a test that injects a failing device would
+// leave a goroutine reopening it for the rest of the run.
+func (s *Stream) Stop() {
+	s.mu.Lock()
+	select {
+	case <-s.stop:
+	default:
+		close(s.stop)
+	}
+	s.running = false
+	s.mu.Unlock()
 }
 
 // publish meters one chunk and fans it out. Both the sound card and the test
