@@ -63,7 +63,31 @@ type Serial struct {
 	// waiting it abandons the rest of the cycle. A reading half a second old has
 	// never cost anybody a contact; a late PTT costs the start of every over.
 	waiting atomic.Int32
+
+	// ⚠️ REOPENING, BECAUSE A DEAD PORT USED TO STAY DEAD. Connected goes false
+	// within 3 s of the radio not answering, so the panel could SEE the problem
+	// - but nothing ever tried to fix it. The host does not exit, so systemd's
+	// Restart=on-failure never fires, and a device-bound restart only helps when
+	// the device node actually disappears. An I/O error that leaves the node in
+	// place - exactly what the USB codec did twice in two days - left rig
+	// control dead until a human restarted the service.
+	dev  string // what to reopen
+	baud int
+	// ⚠️ Injectable ONLY so the reopen can be tested. A recovery path nobody has
+	// watched recover is a hope, not a fix - and this one cannot be exercised
+	// against a real radio without unplugging it mid-QSO.
+	openPort func(string, int) (serial.Port, error)
+	failures int // consecutive poll cycles with no answer at all
+	reopens  int // how many times the port has been reopened, for Describe()
 }
+
+// deadPolls is how many consecutive silent cycles mean the port, not the radio.
+//
+// ⚠️ NOT ONE. A radio busy with a menu, or a cable nudged, can miss a cycle; a
+// reopen on every hiccup would drop the port mid-QSO for no reason. At 250 ms a
+// cycle this is four seconds of complete silence, which is far longer than any
+// legitimate pause and still quick enough that the operator has not given up.
+const deadPolls = 16
 
 func OpenSerial(dev string, baud int) (*Serial, error) {
 	p, err := serial.Open(dev, &serial.Mode{BaudRate: baud})
@@ -73,7 +97,10 @@ func OpenSerial(dev string, baud int) (*Serial, error) {
 	// ⚠️ A read timeout, or a radio that stops answering hangs the poller
 	// forever and the panel shows a frequency that stopped being true.
 	p.SetReadTimeout(400 * time.Millisecond)
-	s := &Serial{port: p, name: dev, stop: make(chan struct{})}
+	s := &Serial{port: p, name: dev, dev: dev, baud: baud, stop: make(chan struct{}),
+		openPort: func(d string, b int) (serial.Port, error) {
+			return serial.Open(d, &serial.Mode{BaudRate: b})
+		}}
 	s.snap.VFO = "A"
 	go s.pollLoop()
 	return s, nil
@@ -183,6 +210,7 @@ func (s *Serial) pollLoop() {
 			return
 		case <-t.C:
 			s.pollOnce()
+			s.reopenIfDead()
 		}
 	}
 }
@@ -197,6 +225,60 @@ func (s *Serial) pollLoop() {
 // This table is also the reason a rig DRIVER exists: another model answers the
 // same questions at different offsets, and that is a table to fill in rather
 // than a parser to rewrite.
+// reopenIfDead closes and reopens the port after a run of completely silent
+// polls. It is the serial twin of the capture supervisor in internal/audio.
+func (s *Serial) reopenIfDead() {
+	s.mu.RLock()
+	silent := time.Since(s.lastOK) > time.Duration(deadPolls)*250*time.Millisecond
+	dev, baud := s.dev, s.baud
+	s.mu.RUnlock()
+	if !silent || dev == "" {
+		return
+	}
+
+	// ⚠️ Take the CAT lock: a reopen while an operator command is mid-exchange
+	// would swap the port out from under a write that is already half sent.
+	s.cat.Lock()
+	defer s.cat.Unlock()
+
+	s.mu.RLock()
+	stillSilent := time.Since(s.lastOK) > time.Duration(deadPolls)*250*time.Millisecond
+	old := s.port
+	s.mu.RUnlock()
+	if !stillSilent {
+		return // it answered while we were waiting for the lock
+	}
+
+	if old != nil {
+		_ = old.Close()
+	}
+	p, err := s.openPort(dev, baud)
+	if err != nil {
+		// ⚠️ Quiet after the first few. A radio switched off overnight would
+		// otherwise fill the journal with one line every four seconds.
+		s.mu.Lock()
+		s.failures++
+		n := s.failures
+		s.mu.Unlock()
+		if n <= 3 || n%15 == 0 {
+			log.Printf("rig: %s is not answering and will not reopen (%d attempts): %v", dev, n, err)
+		}
+		return
+	}
+	p.SetReadTimeout(400 * time.Millisecond)
+
+	s.mu.Lock()
+	s.port = p
+	s.failures = 0
+	s.reopens++
+	// ⚠️ Give it a fresh chance rather than reopening again on the next tick
+	// because lastOK is still old.
+	s.lastOK = time.Now()
+	n := s.reopens
+	s.mu.Unlock()
+	log.Printf("rig: reopened %s after it stopped answering (reopen #%d)", dev, n)
+}
+
 func (s *Serial) pollOnce() {
 	// ⚠️ YIELD BETWEEN QUESTIONS. Every one of these holds the serial line, and
 	// an operator command that arrives mid-cycle must not wait for the rest of
@@ -348,7 +430,18 @@ func (s *Serial) Snapshot() Snapshot {
 	return out
 }
 
-func (s *Serial) Describe() string { return "serial " + s.name }
+// ⚠️ THE REOPEN COUNT IS VISIBLE. A port that quietly reopens itself twice an
+// hour is a failing cable or a failing adapter, and an operator who is never
+// told will keep blaming the software. Silent self-healing hides the fault it is
+// healing.
+func (s *Serial) Describe() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.reopens > 0 {
+		return fmt.Sprintf("serial %s (reopened %d time(s) after it stopped answering)", s.name, s.reopens)
+	}
+	return "serial " + s.name
+}
 
 // ── Control ─────────────────────────────────────────────────────────────────
 //

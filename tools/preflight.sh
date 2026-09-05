@@ -79,26 +79,47 @@ if [ "$QUICK" != "quick" ]; then
     # preflight reported "nothing answers without a session: HTTP 401" - a
     # security check failing loudly for a reason that had nothing to do with
     # security. Twice. A port that might be taken is not a spare port.
-    PFPORT=$(python3 -c 'import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+    # ⚠️ RETRIED, AND THE HOST'S OUTPUT IS KEPT. Picking a free port by binding
+    # :0 and closing it leaves a gap: the kernel hands out ephemeral ports for
+    # OUTBOUND connections from the same range, and on a busy box one of the
+    # curl or ssh calls this repo makes can take it before the host binds. The
+    # host then exits on "address already in use" - and the previous version of
+    # this sent its output to /dev/null, so the whole thing surfaced as
+    # "Connection refused" with no reason anywhere. A failure that hides its own
+    # cause costs more than the failure.
     STORE=$(mktemp -u --suffix=-users.json)
     echo 'preflight-only' | ./hamdeck-host --users "$STORE" users set preflight >/dev/null 2>&1
-    ./hamdeck-host --users "$STORE" --port "$PFPORT" --control-port $((PFPORT-1)) --radio "" >/dev/null 2>&1 &
-    HOSTPID=$!
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        sleep 0.5
-        curl -fsS "http://127.0.0.1:$PFPORT/api/health" >/dev/null 2>&1 && break
+    HOSTLOG=$(mktemp)
+    HOSTPID=""
+    for attempt in 1 2 3; do
+        PFPORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+        ./hamdeck-host --users "$STORE" --port "$PFPORT" --control-port $((PFPORT-1)) --radio "" >"$HOSTLOG" 2>&1 &
+        HOSTPID=$!
+        up=""
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            sleep 0.5
+            curl -fsS "http://127.0.0.1:$PFPORT/api/health" >/dev/null 2>&1 && { up=yes; break; }
+        done
+        [ -n "$up" ] && break
+        kill "$HOSTPID" 2>/dev/null
+        HOSTPID=""
     done
+    if [ -z "$HOSTPID" ]; then
+        printf '  FAIL  the throwaway host would not start on any port\n'
+        sed 's/^/        /' "$HOSTLOG"
+        FAILED+=("the throwaway host would not start")
+    fi
     # ⚠️ And it must be the host we just started - not something else that
     # happened to answer on that port. A stranger answering is the failure above.
     check "the throwaway host is ours, not whatever answered" \
-        bash -c "kill -0 $HOSTPID 2>/dev/null && curl -fsS http://127.0.0.1:$PFPORT/api/health >/dev/null"
+        bash -c "[ -n '$HOSTPID' ] && kill -0 $HOSTPID 2>/dev/null && curl -fsS http://127.0.0.1:$PFPORT/api/health >/dev/null"
     check "nothing answers without a session" \
         env HAMDECK_PASSWORD=preflight-only python3 tools/check_auth.py http://127.0.0.1:$PFPORT preflight
     check "every C++ route has a Go route" \
         env HAMDECK_PASSWORD=preflight-only python3 tools/parity.py http://127.0.0.1:$PFPORT preflight --allow-control
     kill $HOSTPID 2>/dev/null
-    rm -f "$STORE"
+    rm -f "$STORE" "$HOSTLOG"
 fi
 
 printf '\n'
