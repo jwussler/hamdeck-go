@@ -15,6 +15,12 @@ name: build
 on:
   push:
     tags: ['v*']
+  # ⚠️ PULL REQUESTS BUILD AGAIN NOW THAT THIS REPO IS PUBLIC. Public repos get
+  # unlimited standard runners, so the reason this was removed - a private repo
+  # eating its whole month of Actions minutes by the 5th - no longer applies. A
+  # public project that does not check the patches people send it is asking
+  # contributors to guess.
+  pull_request:
   workflow_dispatch:
     inputs:
       desktop:
