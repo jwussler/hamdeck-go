@@ -1,6 +1,47 @@
-# HamDeck Go — work in flight  (09/05/2026, overnight)
+# HamDeck Go — work in flight  (09/05/2026)
 
-## Done this session
+## WHERE THINGS STAND RIGHT NOW
+
+- **The station runs `0.8.0-7-gf422a2b`** (VM 105, 192.168.40.64). Rig connected on
+  /dev/ttyRIG, audio in at 23 ms, audio out, CAT proxy on 4532, TG-XL tuner. Auth enforced.
+- **Rollback is one command:** `tools/deploy-host.sh --rollback` (previous binary is kept at
+  /opt/hamdeck-go/bin/hamdeck-host.previous).
+- **`v0.8.0` is released** on GitHub, built by the tag, all five CI jobs green. Installers for
+  Windows/macOS/Linux; version asserted inside each artifact.
+- **The repo is PUBLIC** — github.com/jwussler/hamdeck-go — which is what permanently fixed
+  the Actions-minutes problem. `git push` goes to BOTH git.wa0o.com and GitHub.
+- **The panel installed on Joe's desktop.** Audio was dead there because the HOST's capture
+  had died; fixed and now self-healing.
+
+## NOTHING IS IN FLIGHT — every change is committed and pushed.
+
+## What is NOT done, and is worth doing next
+
+1. **Code signing.** SmartScreen still says "unknown publisher" and it is the biggest
+   adoption blocker. SignPath Foundation is free for OSS — and the repo is public now, which
+   was the eligibility question. See [[hamdeck-code-signing]].
+2. **The macOS .icns carries only 16/32/128/256** — no 512 or 1024, so Finder upscales.
+   Contents.json declares all ten and every source PNG is the right size, so actool is
+   dropping them for some other reason. Cosmetic; no Mac here to test on.
+3. **Audio on real hardware is still the least-tested path.** VM 109 has no sound device, so
+   every Windows drive proved control only — login, PTT, the key reaching the host. Receive
+   and TX audio on Joe's desktop is the first real test. Could add an emulated HDA controller
+   to VM 109 and re-freeze the `clean` snapshot.
+4. **Splitting `main()`** — deliberately skipped as not worth the risk. Aesthetics.
+5. **More `internal/api` tests.** It has policy + transmit + band plan now; 1,900 lines still
+   mostly uncovered.
+
+## Standing warnings
+- ⚠️ **Check the antenna selection before transmitting.** An earlier parity run cycled it, and
+  VFO B's stored frequency is not recoverable.
+- The rig is routed REAR/USB while a panel holds it, so the hand mic is dead until the panel
+  disconnects or `remote-tx/off` is sent.
+- ⚠️ `tools/deploy-host.sh` restarts the station. It gates and self-rolls-back, but it is
+  still a restart — not while somebody is mid-net.
+
+---
+
+## What happened tonight, in detail
 
 ### The F13 crash is diagnosed and fixed
 Reproduced on the clean Windows 11 box (VM 109) by driving the installed panel:
