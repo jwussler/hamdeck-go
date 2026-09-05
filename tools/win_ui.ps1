@@ -1,21 +1,25 @@
 # Click inside the logged-on Windows session, at real screen pixels.
 #
 # ⚠️ THE HYPERVISOR MOUSE CANNOT DO THIS. `qm monitor mouse_move` always emits
-# RELATIVE deltas, even though VM 109's active pointer is an absolute HID tablet
-# - the tablet accumulates them in an UNBOUNDED counter, so one large negative
-# move (an attempt to home the pointer at 0,0) pushed it past -40000 and no
-# positive move could ever bring it back on screen. Every "click the STATION
-# field" after that landed nowhere, and the keystrokes that followed went to
-# whatever else had focus - an evening of logins that silently never happened.
-# Do not reintroduce mouse_move for pointing.
+# RELATIVE deltas, even though this guest's active pointer is an absolute HID
+# tablet, and the tablet accumulates them in an UNBOUNDED counter - one large
+# negative move to "home" the pointer pushed it past -40000 where no positive
+# move could bring it back. Every click then landed nowhere and the keystrokes
+# after it went to whatever else had focus. Do not reintroduce mouse_move.
 #
 # ⚠️ AND IT MUST RUN IN THE OPERATOR'S SESSION. SetCursorPos from an ssh shell
-# does nothing at all: session 0 has no desktop. This is started the same way the
-# panel is, by a scheduled task with an Interactive principal - see win_ui_run.ps1.
+# does nothing: session 0 has no desktop. Started by win_ui_run.ps1 as a
+# scheduled task with an Interactive principal.
 #
-# Reads one action per line from $env:USERPROFILE\hamdeck-ui-actions.txt, appends to $env:USERPROFILE\hamdeck-ui-result.txt:
-#   click <x>,<y>
-#   sleep <ms>
+# ⚠️ THE ACTIONS ARRIVE AS AN ARGUMENT AND CARRY A NONCE. They used to be written
+# to a file, and the write silently did not happen: the previous run's file
+# stayed on disk, the task read it, and a click aimed at the password box landed
+# on a dropdown from minutes earlier while reporting success. The nonce is
+# echoed back so the caller can prove the result belongs to THIS call.
+#
+#   win_ui.ps1 -Nonce <id> -Actions click:650,470+click:300,480
+param([string]$Nonce = '', [string]$Actions = '')
+
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
@@ -29,11 +33,12 @@ public class Ptr {
 "@ -ReferencedAssemblies System.Drawing
 
 $res = Join-Path $env:USERPROFILE "hamdeck-ui-result.txt"
-Remove-Item $res -ErrorAction SilentlyContinue
-foreach ($line in (Get-Content (Join-Path $env:USERPROFILE "hamdeck-ui-actions.txt"))) {
+Set-Content -Path $res -Value "nonce $Nonce"
+
+foreach ($line in ($Actions -split '\+')) {
     $line = $line.Trim()
     if (-not $line) { continue }
-    $verb, $arg = $line -split '\s+', 2
+    $verb, $arg = $line -split ':', 2
     switch ($verb) {
         'click' {
             $xy = $arg -split ','

@@ -108,6 +108,19 @@ nothing about whether the panel can reach it; one run blamed the panel for a hos
 that was simply not reachable from Windows. It now runs Test-NetConnection from
 the box under test.
 
+### Branding verified in the ARTIFACTS, not the source tree
+- Windows: **7 of 7** icon frames from `hamdeck.ico` found inside `hamdeck_panel.exe`.
+- Linux: the `.deb` ships **8 hicolor sizes** and the `.desktop` points at them.
+- macOS: `AppIcon.icns` inside the `.dmg` renders as the Yagi.
+- Web: `favicon.png` and the PWA icons are byte-identical to the brand files.
+
+⚠️ **Open, minor: the macOS `.icns` carries only 16/32/128/256** (`ic04 ic11 ic07 ic13`) -
+no 512 or 1024 - so Finder upscales at large icon sizes. `Contents.json` declares all ten
+entries and every source PNG is the correct dimension, so `actool` is dropping them for some
+other reason. Not chased: no Mac here, and it is cosmetic. ⚠️ PIL reported only three
+representations where the real table of contents has four - parse the icns, do not trust
+`Image.info['sizes']`.
+
 ## Next
 1. Rebuild, reinstall on the `clean` snapshot, run `tools/win_drive.sh` — prove
    F13 assigns without crashing and that a press keys the rig.

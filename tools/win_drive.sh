@@ -96,30 +96,67 @@ echo "== log in by typing, the way an operator does"
 # running long enough to lose focus. Focus is state; clicking sets it.
 #
 # ⚠️ Twice: on Windows the first click only activates the window.
-click_station() {
-    bash "$(dirname "$0")/win_click.sh" "click 650,314" >/dev/null 2>&1
-    sleep 1
-    bash "$(dirname "$0")/win_click.sh" "click 650,314" >/dev/null 2>&1
-    sleep 1
+#
+# ⚠️ AND EVERY FIELD IS READ BACK. Tuning sleeps did not make this reliable: one
+# run put the address in USERNAME and the username in PASSWORD, the next lost the
+# address entirely and shifted everything the other way, and a third dropped the
+# first three characters of the password so "windrive" arrived as "drive". Each
+# time the run carried on and failed something unrelated several steps later.
+# Type it, look at it, retype it if it is wrong.
+STATION_Y=314
+USER_Y=392
+PASS_Y=470
+
+click_at() { # click_at <y>  - twice, because the first click only activates
+    bash "$(dirname "$0")/win_click.sh" "click 650,$1" >/dev/null 2>&1
+    sleep 0.8
+    bash "$(dirname "$0")/win_click.sh" "click 650,$1" >/dev/null 2>&1
+    sleep 0.8
 }
-click_station
-type_in() { # type_in <text> - into the focused field, replacing what is there
-    key "ctrl-a" 0.3; key "delete" 0.3
-    bash "$(dirname "$0")/win_sendtext.sh" "$VMID" "$1"
-    sleep 0.5
+
+fill() { # fill <y> <text> <regex it must then read> - retries
+    local y="$1" text="$2" want="$3" try got
+    for try in 1 2 3; do
+        click_at "$y"
+        key "ctrl-a" 0.4; key "delete" 0.6
+        bash "$(dirname "$0")/win_sendtext.sh" "$VMID" "$text"
+        sleep 1
+        [ -z "$want" ] && return 0          # a password cannot be read back
+        got=$(bash "$(dirname "$0")/win_read.sh" 460 $((y - 26)) 850 $((y + 22)))
+        case "$got" in
+            *$want*) return 0 ;;
+        esac
+    done
+    return 1
 }
-type_in "http://$SHACK:$PORT"
-key "tab" 0.4; type_in "drive"
-key "tab" 0.4; type_in "windrive"
+
+fill "$STATION_Y" "http://$SHACK:$PORT" "$SHACK" \
+    && ok "the station address went into the STATION box" \
+    || fail "could not type the station address - nothing below this can pass"
+fill "$USER_Y" "drive" "drive" \
+    && ok "the username went into the USERNAME box" \
+    || fail "could not type the username"
+# ⚠️ The password is dots; there is nothing to read back. Its proof is the panel
+# leaving the login screen, checked next.
+fill "$PASS_Y" "windrive" ""
 shot "02-login-typed"
 key "ret" 10
 shot "03-operate"
 
 echo "== is the panel actually talking to the rig?"
+# ⚠️ COUNTING LOGIN REQUESTS IS NOT CHECKING THAT ONE WORKED. The host logs
+# "POST /api/auth/login" for a REFUSED password too, so a run where three
+# characters of the password went missing reported "the host saw a login" and
+# then spent six minutes hunting a PTT chooser on a login form. Ask the panel
+# what it is showing instead: SIGNAL only exists once connected.
 SESSIONS=$(grep -c "POST /api/auth/login" /tmp/windrive-host.log 2>/dev/null | head -1 | tr -dc '0-9')
 SESSIONS=${SESSIONS:-0}
-[ "$SESSIONS" -ge 1 ] && ok "the host saw a login from the Windows panel" \
-    || fail "no login reached the simulator - the panel never connected"
+if bash "$(dirname "$0")/win_find.sh" "SIGNAL" 0 170 900 260 >/dev/null; then
+    ok "the panel is connected and drawing the rig (after $SESSIONS login attempts)"
+else
+    fail "the panel is still on the login screen - see 03-operate.png"
+    echo "     the host saw $SESSIONS login attempt(s), which is not the same as one working"
+fi
 
 echo "== the settings surface, and what it says about the PTT key"
 key "comma" 3
@@ -174,8 +211,19 @@ choose() {
         # F13 row was not merely off to one side - it was not rendered at all,
         # and searching for it reported it missing from a chooser that has it.
         # Eight Ups is more than the list is long; the highlight stops at the top.
-        local u
-        for u in 1 2 3 4 5 6 7 8; do key "up" 0.15; done
+        # One connection for all eight - a round trip per keystroke made this
+        # loop take minutes. Same reason win_sendtext.sh paces a single session.
+        ssh "$PVE" "qm monitor $VMID" >/dev/null 2>&1 <<'UPS'
+sendkey up
+sendkey up
+sendkey up
+sendkey up
+sendkey up
+sendkey up
+sendkey up
+sendkey up
+UPS
+        sleep 1
         # While the menu is open it covers the KEY field, so a match in this
         # region is a menu row and not the field showing the current value.
         if xy=$(bash "$(dirname "$0")/win_find.sh" "$row" $MENU); then
