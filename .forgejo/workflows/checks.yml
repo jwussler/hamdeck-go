@@ -1,0 +1,38 @@
+# The fast checks, on every push to the LOCAL origin.
+#
+# ⚠️ THIS IS NOT THE INSTALLER BUILD. Installers are cut on GitHub from a tag,
+# because macOS cannot be built here - there is no Mac. What runs here is
+# everything that does not need one, on every single commit, for free, in about a
+# minute. Losing per-push CI is what moving off GitHub would otherwise have cost.
+#
+# ⚠️ Runs on the HOST (label `shack`), using the Go and Flutter SDKs already
+# installed on this box - the same ones tools/preflight.sh uses. No container
+# image to keep in step with what the developer actually has.
+name: checks
+on: [push]
+
+jobs:
+  checks:
+    runs-on: shack
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: gofmt leaves nothing to say
+        run: test -z "$(gofmt -l internal cmd)" || { gofmt -l internal cmd; exit 1; }
+
+      - name: go vet
+        run: go vet ./cmd/hamdeck-host/... ./internal/...
+
+      - name: go test
+        run: go test ./cmd/hamdeck-host/... ./internal/...
+
+      # ⚠️ The check that would have stopped three installers shipping with
+      # Flutter's own logo on them. Cheap, so it runs before anything is built.
+      - name: the app carries the HamDeck mark
+        run: python3 tools/check_branding.py
+
+      - name: flutter analyze
+        run: cd client && flutter analyze lib test
+
+      - name: flutter test
+        run: cd client && flutter test
