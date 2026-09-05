@@ -33,6 +33,13 @@ PrivilegesRequired=lowest
 OutputDir=.
 OutputBaseFilename=HamDeck-Panel-Windows-Setup
 UninstallDisplayIcon={app}\hamdeck_panel.exe
+; ⚠️ THE MARK, EVERYWHERE THE OPERATOR SEES ONE. This was missed on every build
+; so far: the app shipped with FLUTTER'S OWN LOGO as its icon, so the taskbar,
+; the Start menu and Add/Remove Programs all showed a stranger's product. The
+; installer had no icon at all. Asked for repeatedly; the check in tools/
+; preflight.sh is what stops it going missing again.
+SetupIconFile=branding\hamdeck.ico
+WizardSmallImageFile=branding\wizard-small.bmp
 UninstallDisplayName=HamDeck Panel
 Compression=lzma2/max
 SolidCompression=yes
@@ -46,10 +53,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; record_windows_plugin.dll. Their absence does not stop it starting; it starts
 ; fine and silently has no audio in either direction, which is far worse.
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "branding\hamdeck.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\HamDeck Panel"; Filename: "{app}\hamdeck_panel.exe"
-Name: "{userdesktop}\HamDeck Panel"; Filename: "{app}\hamdeck_panel.exe"; Tasks: desktopicon
+; IconFilename is explicit so a shortcut shows the mark even before the exe's own
+; resource is read.
+Name: "{group}\HamDeck Panel"; Filename: "{app}\hamdeck_panel.exe"; IconFilename: "{app}\hamdeck.ico"
+Name: "{userdesktop}\HamDeck Panel"; Filename: "{app}\hamdeck_panel.exe"; IconFilename: "{app}\hamdeck.ico"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"

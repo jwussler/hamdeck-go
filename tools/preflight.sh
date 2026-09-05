@@ -40,6 +40,9 @@ check "gofmt leaves nothing to say" bash -c '[ -z "$(gofmt -l internal cmd)" ]'
 check "go vet" go vet ./cmd/hamdeck-host/... ./internal/...
 check "go test" go test ./cmd/hamdeck-host/... ./internal/...
 check "the host builds" go build ./cmd/hamdeck-host
+# ⚠️ BEFORE THE COMPILERS, because it is cheap and because it is the check that
+# would have stopped three installers shipping with Flutter's logo on them.
+check "the app carries the HamDeck mark" python3 tools/check_branding.py
 
 step "the panel"
 check "flutter analyze" bash -c 'cd client && flutter analyze lib test'

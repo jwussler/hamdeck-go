@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
@@ -755,6 +755,10 @@ class _PanelState extends State<Panel> with WindowListener {
   // layout pinned the transmit bar over a scrolling column, and when the bar
   // grew during a tune it sliced the RIT controls in half - the controls were
   // covered at exactly the moment the transmitter was keyed.
+  // ⚠️ ONE CONTROLLER, SHARED BY THE BAR AND THE VIEW. A Scrollbar whose
+  // controller is not the view's controller throws at paint time.
+  final ScrollController _surfaceScroll = ScrollController();
+
   Widget _panelBody() => Stack(children: [
         Column(children: [
           _head(),
@@ -765,11 +769,21 @@ class _PanelState extends State<Panel> with WindowListener {
           // cards; the scroll view still takes over on a short window.
           Expanded(
             child: LayoutBuilder(builder: (context, box) {
-              return SingleChildScrollView(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: box.maxHeight),
-                  child: IntrinsicHeight(
-                      child: _surface == 0 ? _operate() : _setup()),
+              // ⚠️ THE SCROLLBAR IS ALWAYS DRAWN WHEN THERE IS MORE. On a
+              // 1280x800 Windows box the transmit block and THIS STATION are
+              // below the fold, and with no scrollbar a card sliced off at the
+              // viewport edge does not read as "scroll down", it reads as a
+              // broken panel - which is exactly how it was reported.
+              return Scrollbar(
+                controller: _surfaceScroll,
+                thumbVisibility: true,
+                child: SingleChildScrollView(
+                  controller: _surfaceScroll,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: box.maxHeight),
+                    child: IntrinsicHeight(
+                        child: _surface == 0 ? _operate() : _setup()),
+                  ),
                 ),
               );
             }),
@@ -1243,7 +1257,7 @@ class _PanelState extends State<Panel> with WindowListener {
                 child: _dropdown<String>(
                   value: _ptt.keyName,
                   items: [
-                    for (final (name, why) in GlobalPtt.choices)
+                    for (final (name, why) in GlobalPtt.choicesFor(defaultTargetPlatform))
                       (name, '$name — $why'),
                   ],
                   onChanged: (v) async {

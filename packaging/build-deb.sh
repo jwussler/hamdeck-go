@@ -82,6 +82,16 @@ Description: HamDeck desktop panel
  Desktop client for a HamDeck station host: frequency, mode, band, the antenna
  tuner, receive audio and push to talk.
 EOF
+# ⚠️ THE ICON FILE, NOT JUST THE NAME OF ONE. The .desktop below has always
+# said Icon=hamdeck-panel and nothing ever installed a hamdeck-panel.png, so
+# every Linux install showed a blank placeholder in the launcher - the same miss
+# that shipped Flutter's own logo as the Windows app icon.
+for s in 16 24 32 48 64 128 256 512; do
+    src="$ROOT/packaging/branding/hicolor/$s.png"
+    [ -f "$src" ] || continue
+    install -Dm644 "$src" "$STAGE/usr/share/icons/hicolor/${s}x${s}/apps/hamdeck-panel.png"
+done
+
 cat > "$STAGE/usr/share/applications/hamdeck-panel.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application

@@ -32,6 +32,12 @@ import 'keystate/keystate.dart';
 ///    zero presses, which is the difference between "my PTT is broken" and "my
 ///    PTT is bound to something else".
 ///
+/// ⚠️ HOW THE KEY IS TAKEN DIFFERS BY PLATFORM, and it changes what the key
+/// costs. macOS and Linux REGISTER it, which removes it from every other
+/// application. Windows POLLS it instead - see `_pollsTheKey`, the plugin aborts
+/// the process - so there the key is only watched and still reaches whatever has
+/// focus. The chooser says whichever is true; see choicesFor().
+///
 /// ⚠️ A KEY REGISTERED SYSTEM-WIDE IS TAKEN FROM EVERY OTHER APPLICATION on the
 /// machine, for as long as this runs. F13/F14/F15 collide with nothing because
 /// no physical keyboard sends them — they are what a footswitch or a programmable
@@ -107,7 +113,30 @@ class GlobalPtt {
   /// What is ARMED, in words, never inferred. Drawn in the panel as-is.
   String get status => _status;
 
-  bool get active => _registered != null;
+  /// Is a system-wide key armed, by EITHER mechanism? Not "did the plugin take
+  /// it" - on Windows the plugin is never asked.
+  bool get active => _registered != null || _edge != null;
+
+  /// ⚠️ WINDOWS DOES NOT GO THROUGH THE HOTKEY PLUGIN AT ALL.
+  ///
+  /// `hotkey_manager_windows_plugin.dll` aborts the PROCESS while registering a
+  /// key - Windows Error Reporting records exception c0000409 (__fastfail) in
+  /// that DLL, which is a native abort: no Dart try/catch can catch it, so no
+  /// amount of guarding on this side can make the call safe. Choosing F13 in the
+  /// chooser killed the panel outright on a clean Windows 11 box, reproducibly.
+  ///
+  /// So the key is POLLED instead, with the same GetAsyncKeyState this file
+  /// already used for the release edge. That is one mechanism instead of two, it
+  /// gives a real key-up, it works while the panel is in the background, and it
+  /// cannot take the app down.
+  bool get _pollsTheKey =>
+      defaultTargetPlatform == TargetPlatform.windows &&
+      KeyState.instance.available &&
+      KeyState.instance.knows(_keyName);
+
+  /// The edge watcher, when this platform polls the key rather than registering
+  /// it. Non-null exactly while a polled key is armed.
+  Timer? _edge;
 
   /// Has a press actually arrived? See use(): registration can fail silently on
   /// both desktop platforms, so this is the only proof the key is really ours.
@@ -126,7 +155,7 @@ class GlobalPtt {
   }
 
   void _restate() {
-    if (_registered == null) return;
+    if (!active) return;
     _status = _confirmed
         ? 'system-wide, $_mode'
         : '$_keyName claimed, $_mode  ·  PRESS IT ONCE TO CONFIRM — '
@@ -142,6 +171,26 @@ class GlobalPtt {
   /// friendly label.
   bool get canHold => (defaultTargetPlatform == TargetPlatform.macOS) || KeyState.instance.available;
 
+  /// ⚠️ WHAT A KEY COSTS DEPENDS ON HOW IT IS TAKEN, so the chooser says the
+  /// true thing for THIS platform. A registered key is removed from every other
+  /// application; a polled key is only watched, so it still reaches whatever has
+  /// focus - which for F9 and F12 means pressing it in a logger ALSO keys the
+  /// rig. Those are opposite hazards and the old text described only one.
+  static List<(String, String)> choicesFor(TargetPlatform platform) {
+    final polls = platform == TargetPlatform.windows && KeyState.instance.available;
+    if (!polls) return choices;
+    return choices.map((c) {
+      switch (c.$1) {
+        case 'F9':
+        case 'F12':
+          return (c.$1, '⚠ commonly bound — it still works in other apps here, '
+              'so pressing it anywhere WILL key the rig');
+        default:
+          return c;
+      }
+    }).toList();
+  }
+
   /// Register, or move to, a key. "Off" unregisters.
   Future<void> use(String name, {required bool hold}) =>
       _work = _work.then((_) => _use(name, hold: hold));
@@ -153,6 +202,17 @@ class GlobalPtt {
     _keyName = name;
     if (name == 'Off' || !_keys.containsKey(name)) {
       _status = 'no system-wide key — the panel must have focus';
+      onChanged();
+      return;
+    }
+    if (_pollsTheKey) {
+      // ⚠️ NOTHING IS REGISTERED. See _pollsTheKey: asking the Windows plugin to
+      // register this key aborts the process.
+      _registered = null;
+      _platformHolds = false;
+      _confirmed = false;
+      _startEdgeWatch();
+      _restate();
       onChanged();
       return;
     }
@@ -205,6 +265,8 @@ class GlobalPtt {
     _limit = null;
     _poll?.cancel();
     _poll = null;
+    _edge?.cancel();
+    _edge = null;
     final hk = _registered;
     // ⚠️ CLEARED BEFORE THE AWAIT, and only unregistered if the platform is
     // actually holding it. Two calls that both see a non-null field and both
@@ -250,6 +312,33 @@ class GlobalPtt {
     await onDown();
   }
 
+  /// ⚠️ BOTH EDGES, FROM ONE POLL. Windows gets no plugin callbacks at all now,
+  /// so this is the entire push-to-talk: the down edge keys, the up edge unkeys.
+  ///
+  /// 15 ms because this one is on the PRESS path - the operator hears their own
+  /// latency at the start of an over - where the release-only watcher below can
+  /// afford 25 ms. It asks about ONE key, the one the operator nominated, and
+  /// can learn nothing else about the keyboard: no hook, no keylogging surface.
+  ///
+  /// ⚠️ It keeps running while the panel is in the background. That is the
+  /// point: the operator is looking at a logger or a cluster, not at us.
+  void _startEdgeWatch() {
+    _edge?.cancel();
+    var was = KeyState.instance.isDown(_keyName) ?? false;
+    _edge = Timer.periodic(const Duration(milliseconds: 15), (_) {
+      final now = KeyState.instance.isDown(_keyName);
+      if (now == null || now == was) return;
+      was = now;
+      if (now) {
+        _pressed();
+      } else if (_hold) {
+        // ⚠️ Only hold cares about the up edge. In toggle the release is the
+        // operator lifting their finger off a key that is meant to stay keyed.
+        _released('key released');
+      }
+    });
+  }
+
   Timer? _poll;
 
   /// ⚠️ THE RELEASE, WHERE THE PLATFORM WILL NOT SEND ONE. 25 ms is fast enough
@@ -258,6 +347,9 @@ class GlobalPtt {
   /// nothing else about the keyboard.
   void _watchForRelease() {
     _poll?.cancel();
+    // ⚠️ Not where the edge watcher already owns both edges - two timers racing
+    // to call _released is how a release gets reported twice.
+    if (_edge != null) return;
     if (!_hold || (defaultTargetPlatform == TargetPlatform.macOS) || !KeyState.instance.available) return;
     _poll = Timer.periodic(const Duration(milliseconds: 25), (t) {
       final down = KeyState.instance.isDown(_keyName);

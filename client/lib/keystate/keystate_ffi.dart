@@ -41,6 +41,13 @@ class KeyState {
   int Function(int)? _getAsyncKeyState;
   bool _tried = false;
 
+  /// Is this one of the keys this probe can actually poll?
+  ///
+  /// ⚠️ Asked BEFORE anything is armed. On Windows the whole PTT key is driven
+  /// by polling now, so a key that is not in the table below has no mechanism at
+  /// all - and silently arming nothing is the failure this app keeps having.
+  bool knows(String keyName) => _vk.containsKey(keyName);
+
   bool get available {
     if (!Platform.isWindows) return false;
     _load();

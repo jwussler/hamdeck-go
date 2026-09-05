@@ -67,6 +67,16 @@ stop_vm() {
 }
 trap stop_vm EXIT
 
+# ⚠️ ROLL BACK FIRST WHEN ASKED. A machine that has had three installers on it is
+# not the machine an operator has, and the difference is not cosmetic: this build
+# only failed on a box that had never had a Visual C++ redistributable. Pass
+# --clean and the test runs against a baseline instead of accumulated state.
+if [ "${WIN_TEST_CLEAN:-}" = "1" ] || [ "${3:-}" = "--clean" ]; then
+    echo "== rolling the box back to the clean baseline"
+    bash "$(dirname "$0")/win_baseline.sh" reset clean
+    WAS_OFF=1
+fi
+
 start_vm
 
 fail() { echo "  FAIL  $1"; FAILED=1; }
@@ -122,25 +132,21 @@ $SSH 'powershell -NoProfile -Command "if ((query session 2>$null | Select-String
     && ok "an interactive session is present" \
     || fail "nobody is logged in - no desktop for a windowed app (autologon off, or it is sitting at the lock screen)"
 
-echo "== start it IN THE OPERATOR'S SESSION, and see whether it is alive 30 s later"
-# ⚠️ SESSION 0 IS NOT A DESKTOP. Start-Process over SSH runs the app in the
-# service session, where it has no visible window: the process check passes, the
-# screenshot shows an empty desktop, and the app is "running" in a place no
-# operator will ever see. A scheduled task marked /it runs it in the logged-on
-# session, which is what double-clicking the shortcut does.
-$SSH 'powershell -NoProfile -Command "Get-Process hamdeck_panel -ErrorAction SilentlyContinue | Stop-Process -Force"' >/dev/null 2>&1
-# ⚠️ REGISTERED WITH PowerShell, NOT schtasks. The schtasks command line needs
-# quotes inside quotes inside an ssh argument, and it silently registered a task
-# with an EMPTY Execute - which then failed with 0xC0000135 and looked like a
-# missing DLL in the app rather than a mangled command line.
-$SSH 'powershell -NoProfile -Command "
-  $dir = \"$env:LOCALAPPDATA\HamDeck Panel\"
-  $act = New-ScheduledTaskAction -Execute (Join-Path $dir hamdeck_panel.exe) -WorkingDirectory $dir
-  $pri = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
-  Register-ScheduledTask -TaskName hamdecktest -Action $act -Principal $pri -Force | Out-Null
-  Start-ScheduledTask -TaskName hamdecktest"' >/dev/null 2>&1
-$SSH 'powershell -NoProfile -Command "Start-Sleep -Seconds 30; if (Get-Process hamdeck_panel -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"' \
-    && ok "still running after 30 s" || fail "the app died after starting"
+echo "== start it IN THE OPERATOR'S SESSION and watch it stay up"
+# ⚠️ The launcher is a script FILE on the far end, and it checks that the task it
+# registers actually exists. The inline version failed without a word, and this
+# test only ever passed because it was starting a task registered by hand.
+scp -q -i "$KEY" tools/win_launch.ps1 "$VM_USER@$VM_HOST:C:/win_launch.ps1" 2>/dev/null
+LAUNCH=$($SSH 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\win_launch.ps1 -TaskName hamdecktest' 2>&1 | tr -d '\r')
+echo "$LAUNCH" | sed 's/^/     /'
+if echo "$LAUNCH" | grep -q "^running after"; then
+    sleep 15
+    $SSH 'powershell -NoProfile -Command "if (Get-Process hamdeck_panel -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"' \
+        && ok "it started and was still up 15 s later" \
+        || fail "it started and then quit"
+else
+    fail "it never started"
+fi
 
 echo "== photograph the desktop, because 'running' is not 'drawing'"
 # ⚠️ THE PICTURE COMES FROM THE HYPERVISOR, NOT FROM INSIDE WINDOWS. An SSH

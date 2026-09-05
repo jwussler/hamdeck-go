@@ -5,6 +5,7 @@
 class KeyState {
   KeyState._();
   static final KeyState instance = KeyState._();
+  bool knows(String keyName) => false;
   bool get available => false;
   bool? isDown(String keyName) => null;
 }
