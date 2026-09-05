@@ -299,7 +299,16 @@ class _PanelState extends State<Panel> with WindowListener {
     final api = Api(base);
     final err = await api.login(_user.text.trim(), _pass.text);
     if (err != null) {
-      setState(() => _error = err);
+      // ⚠️ NAME THE LIKELY CAUSE. https is implied, and a host reached by bare
+      // IP address usually has no certificate for it - so "no reply from
+      // https://192.168.40.64" is technically true and useless. Found by
+      // installing the real app on a desktop and typing an address into it.
+      final looksLikeIp = RegExp(r'^\d+\.\d+\.\d+\.\d+$')
+          .hasMatch(_host.text.trim().replaceFirst(RegExp(r'^https?://'), ''));
+      setState(() => _error = (err.startsWith('no reply') && looksLikeIp)
+          ? '$err\n\nA bare IP address rarely has a certificate. '
+              'Try http://${_host.text.trim()} , or use the station\'s name.'
+          : err);
       return;
     }
     // ⚠️ REMEMBERED ONLY AFTER A LOGIN THAT WORKED. Saving what was typed on

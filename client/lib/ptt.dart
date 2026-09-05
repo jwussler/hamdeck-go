@@ -109,6 +109,30 @@ class GlobalPtt {
 
   bool get active => _registered != null;
 
+  /// Has a press actually arrived? See use(): registration can fail silently on
+  /// both desktop platforms, so this is the only proof the key is really ours.
+  bool _confirmed = false;
+  bool get confirmed => _confirmed;
+
+  String get _mode {
+    if (_hold) {
+      return (defaultTargetPlatform == TargetPlatform.macOS)
+          ? 'hold — works with any window focused'
+          : 'hold — release detected by key-state polling';
+    }
+    return canHold
+        ? 'toggle — press to key, press again to unkey'
+        : 'toggle — this platform sends no key release, so hold is not offered';
+  }
+
+  void _restate() {
+    if (_registered == null) return;
+    _status = _confirmed
+        ? 'system-wide, $_mode'
+        : '$_keyName claimed, $_mode  ·  PRESS IT ONCE TO CONFIRM — '
+            'registration can fail silently and this panel will not claim it works';
+  }
+
   /// Can this platform tell us when the key is RELEASED?
   ///
   /// ⚠️ macOS delivers a real key-up event. Windows does not - its plugin emits
@@ -149,18 +173,19 @@ class GlobalPtt {
       );
       _registered = hk;
       _platformHolds = true;
-      if (_hold) {
-        _status = (defaultTargetPlatform == TargetPlatform.macOS)
-            ? 'system-wide, hold — $name works with any window focused'
-            : 'system-wide, hold — $name, release detected by key-state polling';
-      } else {
-        _status = hold && !canHold
-            // ⚠️ Say WHY it is not hold, or the operator assumes the setting
-            // did not take.
-            ? 'system-wide, toggle — this platform sends no key release, '
-                'so hold is not offered. Press $name to key, again to unkey'
-            : 'system-wide, toggle — press $name to key, press again to unkey';
-      }
+      // ⚠️ CLAIMED, NOT CONFIRMED - AND THE PANEL SAYS WHICH.
+      //
+      // Registration failing does not always throw. On Linux the plugin logs
+      // "Binding 'F13' failed!" and returns normally; on Windows the native
+      // code calls RegisterHotKey and NEVER CHECKS ITS RETURN VALUE, so a key
+      // another application already owns is recorded as registered and then
+      // never fires. Either way this side is told nothing.
+      //
+      // So the status stays "claimed" until a press actually arrives. The
+      // difference matters at exactly the wrong moment: an operator who
+      // believes their PTT is armed, and finds out mid-net that it is not.
+      _confirmed = false;
+      _restate();
     } catch (e) {
       // ⚠️ Registration is REFUSED when another application already owns the
       // key. Say which, and say what the panel can still do - a status line that
@@ -201,6 +226,11 @@ class GlobalPtt {
 
   Future<void> _pressed() async {
     _presses++;
+    if (!_confirmed) {
+      // ⚠️ The first press is the proof, and it is the only one there is.
+      _confirmed = true;
+      _restate();
+    }
     if (!_hold) {
       // Toggle: this press is whichever edge the last one was not.
       if (_down) {
