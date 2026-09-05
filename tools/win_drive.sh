@@ -37,6 +37,18 @@ PORT=5920
 OUT="${1:-/tmp/win-drive}"
 SSH="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $VM_USER@$VM_HOST"
 mkdir -p "$OUT"
+
+# ⚠️ ONE AT A TIME. Two of these ran against the same VM at once - a chained
+# starter fired after one had already been launched by hand - and they fought
+# each other over the mouse and keyboard while interleaving into the same log.
+# Clicks from one landed during the other's typing, which looks exactly like the
+# flaky UI this script exists to rule out.
+LOCK=/tmp/hamdeck-win-drive.lock
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    echo "another win_drive.sh is already driving this VM - refusing to fight it for the mouse"
+    exit 1
+fi
 FAILED=0
 fail() { echo "  FAIL  $1"; FAILED=1; }
 ok()   { echo "  ok    $1"; }
@@ -206,6 +218,12 @@ MENU="100 60 1250 790"
 # that never opened reports "could not select F13" about a panel that is fine.
 open_key_menu() {
     local i
+    # ⚠️ CLOSE IT FIRST. On a retry the menu is usually still OPEN, and the click
+    # that is meant to open it then lands on whatever row happens to sit at the
+    # dropdown's coordinates - selecting a random key and closing the menu. Every
+    # retry made the next one worse, which is why three attempts failed as
+    # reliably as one.
+    key "esc" 0.6
     for i in 1 2 3; do
         bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
         sleep 1.5
@@ -295,6 +313,25 @@ KEYED=$(tail -n +$((BEFORE+1)) /tmp/windrive-host.log | grep -ciE "/api/ptt" || 
 # key while the panel is not armed - it says "Not armed. Press E or click ARM
 # first." - and the up edge always unkeys defensively. Asserting a ptt/on would
 # be asserting a bug.
+echo "== and it must work with the panel in the BACKGROUND"
+# ⚠️ THIS IS THE WHOLE POINT OF A SYSTEM-WIDE KEY, and until now it was only
+# reasoned about. GetAsyncKeyState is documented as global, but "documented as"
+# is not "measured on this build". The operator is looking at a logger or a
+# cluster, not at us - a PTT that only works while the panel has focus is not
+# the feature that was asked for.
+#
+# Focus something else that is definitely not the panel, then press the key.
+bash "$(dirname "$0")/win_click.sh" "click 640,770" >/dev/null 2>&1   # the taskbar
+sleep 2
+BG_BEFORE=$(wc -l < /tmp/windrive-host.log)
+key "f12" 2; key "f12" 2
+sleep 2
+shot "07-background-press"
+BG=$(tail -n +$((BG_BEFORE+1)) /tmp/windrive-host.log | grep -ciE "/api/ptt" || true)
+[ "${BG:-0}" -ge 1 ] \
+    && ok "the key still reached the rig with the panel in the background ($BG ptt calls)" \
+    || fail "the key only works when the panel has focus - that is not a system-wide PTT"
+
 PRESSES=$(bash "$(dirname "$0")/win_read.sh" 30 380 660 405)
 echo "     panel says: $PRESSES"
 echo "$PRESSES" | grep -qiE "system-wide" \
