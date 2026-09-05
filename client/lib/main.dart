@@ -39,6 +39,12 @@ class _PanelState extends State<Panel> {
   final _port = TextEditingController();
   bool _advanced = false;
 
+  // Receiver levels, read from the radio at connect and after every change.
+  // ⚠️ NOT in the 2 Hz poll: every read is a CAT exchange on a serial line that
+  // answers one question at a time, and the panel already asks it five things.
+  int _af = 0;
+  int _rf = 0;
+
   Api? _api;
   // ⚠️ The platform implementation is chosen at COMPILE time - a desktop
   // build never sees Web Audio, and a web build never sees dart:io.
@@ -162,6 +168,7 @@ class _PanelState extends State<Panel> {
     // was written to catch. Nothing is transmitted and the radio is not touched;
     // it just means a dead input is visible before it matters.
     _loadMics();
+    _loadLevels();
 
     _poll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       final t0 = DateTime.now();
@@ -253,8 +260,13 @@ class _PanelState extends State<Panel> {
             // naming one operator's host is a default host wearing a hat: it
             // ships in a public client, it gets typed by people who have their
             // own radio, and it points them at a station that is not theirs.
-            _field('STATION', _host, hint: 'hostname or IP address'),
-            _field('USERNAME', _user),
+            // ⚠️ FOCUS STARTS WHERE THERE IS SOMETHING TO TYPE. Served by the
+            // host, the address is already filled in, so the cursor belongs in
+            // USERNAME - otherwise the first keystroke lands in a field that
+            // was already correct and quietly breaks it.
+            _field('STATION', _host,
+                hint: 'hostname or IP address', autofocus: _host.text.isEmpty),
+            _field('USERNAME', _user, autofocus: _host.text.isNotEmpty),
             _field('PASSWORD', _pass, obscure: true, onSubmit: _connect),
             Align(
               alignment: Alignment.centerLeft,
@@ -300,7 +312,8 @@ class _PanelState extends State<Panel> {
       );
 
   Widget _field(String label, TextEditingController c,
-          {bool obscure = false, String? hint, VoidCallback? onSubmit}) =>
+          {bool obscure = false, String? hint, VoidCallback? onSubmit,
+          bool autofocus = false}) =>
       Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -309,6 +322,7 @@ class _PanelState extends State<Panel> {
           TextField(
             controller: c,
             obscureText: obscure,
+            autofocus: autofocus,
             onSubmitted: (_) => onSubmit?.call(),
             style: const TextStyle(color: T.text, fontFamily: T.mono),
             decoration: InputDecoration(
@@ -344,6 +358,19 @@ class _PanelState extends State<Panel> {
     // Meter the microphone straight away. Nothing is sent and the radio is not
     // touched - it just means a dead microphone is visible before it matters.
     if (!_tx.running) await _tx.startMonitor();
+  }
+
+  /// ⚠️ Reads what the RADIO is set to rather than assuming a starting value -
+  /// a slider drawn at 0 when the rig is at 88 is a control that lies until it
+  /// is touched, and touching it is what an operator does to fix the lie.
+  Future<void> _loadLevels() async {
+    final af = await _api?.send('/api/volume/get');
+    final rf = await _api?.send('/api/rf-gain/get');
+    if (!mounted) return;
+    setState(() {
+      if (af?['read'] == true) _af = (af?['volume'] as num?)?.toInt() ?? _af;
+      if (rf?['read'] == true) _rf = (rf?['rf_gain'] as num?)?.toInt() ?? _rf;
+    });
   }
 
   bool get _sendingSilence =>
@@ -542,19 +569,37 @@ class _PanelState extends State<Panel> {
           child: _panelBody(),
         ),
       );
-
+  // ── The shape of the panel ────────────────────────────────────────────
+  //
+  //   head        band/mode · frequency · power, then ONE meter
+  //   surface     OPERATE (three columns) or SETUP
+  //   audio       receive and microphone levels, and the recorder
+  //   transmit    ARM · PTT · TUNE · ATU, pinned, never behind a scroll
+  //
+  // ⚠️ EVERY ROW HERE IS A REAL ROW, not a stack of overlays. The previous
+  // layout pinned the transmit bar over a scrolling column, and when the bar
+  // grew during a tune it sliced the RIT controls in half - the controls were
+  // covered at exactly the moment the transmitter was keyed.
   Widget _panelBody() => Stack(children: [
         Column(children: [
           _head(),
+          // ⚠️ FILL THE HEIGHT, THEN SCROLL IF IT WILL NOT FIT. Laid out as a
+          // plain scroll view the cards hugged their content and left a void
+          // above the audio strip - the same wasted space the old full-width
+          // rows produced, just moved. minHeight hands the leftover to the
+          // cards; the scroll view still takes over on a short window.
           Expanded(
-            child: SingleChildScrollView(
-              child: _surface == 0 ? _operate() : _setup(),
-            ),
+            child: LayoutBuilder(builder: (context, box) {
+              return SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: box.maxHeight),
+                  child: IntrinsicHeight(
+                      child: _surface == 0 ? _operate() : _setup()),
+                ),
+              );
+            }),
           ),
-          // ⚠️ PINNED, AND ON BOTH SURFACES. Stopping a transmission is never
-          // behind a scroll, a tab or a popup. A control operator has to be able
-          // to end a transmission immediately; a panel where PTT scrolled off
-          // the bottom failed that outright, and it did.
+          _audioStrip(),
           _transmitBar(),
         ]),
         if (_showKeys)
@@ -578,15 +623,17 @@ class _PanelState extends State<Panel> {
           ),
       ]);
 
-  // ── The head: what the station is doing, and whether we can trust it ──────
+  // ── The head ──────────────────────────────────────────────────────────
   Widget _head() {
     final tx = _rig?['tx'] == true;
     final hz = (_rig?['freq'] as num?)?.toInt() ?? 0;
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
       decoration: BoxDecoration(
           color: T.panelDeep,
-          border: Border(bottom: BorderSide(color: tx ? T.txRed : T.line, width: tx ? 2 : 1))),
+          border: Border(
+              bottom: BorderSide(
+                  color: tx ? T.txRed : T.line, width: tx ? 2 : 1))),
       child: Column(children: [
         Row(children: [
           _tab('OPERATE', 0),
@@ -596,22 +643,22 @@ class _PanelState extends State<Panel> {
           _linkPill(),
         ]),
         const SizedBox(height: 8),
-        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
           // Band and mode sit left of the readout, the way they do on a rig.
           SizedBox(
-            width: 92,
+            width: 140,
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(_bandName(hz),
                   style: const TextStyle(
-                      fontFamily: T.mono, fontSize: 17, color: T.text)),
+                      fontFamily: T.mono, fontSize: 24, color: T.text)),
               Text('${_rig?['mode'] ?? '—'}',
                   style: const TextStyle(
-                      fontFamily: T.mono, fontSize: 15, color: T.dim)),
+                      fontFamily: T.mono, fontSize: 15, color: T.amber)),
             ]),
           ),
           Expanded(
-            child: Center(
-              child: Readout(
+            child: Column(children: [
+              Readout(
                 hz: hz,
                 stale: _stale,
                 tx: tx,
@@ -622,37 +669,44 @@ class _PanelState extends State<Panel> {
                 },
                 onKeypad: () => setState(() => _keypad = !_keypad),
               ),
-            ),
+              const SizedBox(height: 7),
+              // ⚠️ Clear of the digits. This line used to sit tight under them
+              // and collided with the digit the cursor was marking.
+              Text(
+                  'scroll or click a digit to tune  ·  ← → step '
+                  '${_step >= 1000 ? "${_step ~/ 1000} kHz" : "$_step Hz"}'
+                  '  ·  F keypad  ·  ? keys',
+                  style: const TextStyle(
+                      fontFamily: T.mono, fontSize: 9, color: T.dim)),
+            ]),
           ),
           SizedBox(
-            width: 118,
+            width: 140,
             child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text('VFO ${_rig?['vfo'] ?? '—'}',
-                  style: const TextStyle(
-                      fontFamily: T.mono, fontSize: 14, color: T.dim)),
-              Text('${_rig?['power'] ?? '—'} W',
-                  style: const TextStyle(
-                      fontFamily: T.mono, fontSize: 17, color: T.text)),
-              if (_rig?['split'] == true)
-                Text('SPLIT ${_fmt((_rig?['freq_b'] as num?)?.toInt() ?? 0)}',
-                    style: const TextStyle(
-                        fontFamily: T.mono, fontSize: 11, color: T.amber)),
+              RichText(
+                text: TextSpan(children: [
+                  TextSpan(
+                      text: '${_rig?['power'] ?? '—'}',
+                      style: const TextStyle(
+                          fontFamily: T.mono, fontSize: 24, color: T.text)),
+                  const TextSpan(
+                      text: ' W',
+                      style: TextStyle(
+                          fontFamily: T.mono, fontSize: 13, color: T.dim)),
+                ]),
+              ),
+              Text(
+                  'VFO ${_rig?['vfo'] ?? '—'}'
+                  '${_rig?['split'] == true ? " · SPLIT" : ""}',
+                  style: TextStyle(
+                      fontFamily: T.mono,
+                      fontSize: 11,
+                      color: _rig?['split'] == true ? T.amber : T.dim)),
             ]),
           ),
         ]),
-        const SizedBox(height: 6),
-        // ⚠️ A hint, once, where the gesture lives. The readout being the tuning
-        // control is the single most useful thing here and the least guessable.
-        // ⚠️ The keyboard step is SHOWN, because the arrow keys are useless if
-        // you cannot tell how far the next press will move the radio. It is
-        // announced when it changes too, for an operator who cannot see it.
-        Text(
-            'wheel or click a digit  ·  arrows tune by '
-            '${_step >= 1000 ? "${_step ~/ 1000} kHz" : "$_step Hz"}'
-            '  ·  ? for keys',
-            style: const TextStyle(fontFamily: T.mono, fontSize: 9, color: T.dim)),
         const SizedBox(height: 8),
-        _meter(),
+        _meterCard(),
       ]),
     );
   }
@@ -697,7 +751,7 @@ class _PanelState extends State<Panel> {
       final bad = _rttMs > 400 || _jitterMs > 60;
       final warn = _rttMs > 200 || _jitterMs > 25;
       c = bad ? T.txRed : (warn ? T.amber : T.okGreen);
-      text = 'link ${_rttMs} ms · jitter ${_jitterMs} ms';
+      text = 'link $_rttMs ms · jitter $_jitterMs ms';
     }
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Container(
@@ -705,9 +759,644 @@ class _PanelState extends State<Panel> {
           height: 8,
           decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
       const SizedBox(width: 6),
-      Text(text,
-          style: TextStyle(fontFamily: T.mono, fontSize: 10, color: c)),
+      Text(text, style: TextStyle(fontFamily: T.mono, fontSize: 10, color: c)),
     ]);
+  }
+
+  // ── ONE METER, IN ONE PLACE, WITH TWO ROLES ───────────────────────────
+  //
+  // ⚠️ RECEIVE SHOWS SIGNAL, TRANSMIT SHOWS THE TRANSMITTER, and they share the
+  // same strip of screen. Two meters means an operator checking "am I putting
+  // out power" looks at the one that is not live; wfview settled on this and it
+  // is right.
+  //
+  // ⚠️ AND IT CARRIES A SCALE. The bar was drawn with no ticks at all, so a
+  // reading could only be judged by the number beside it - which makes the bar
+  // decoration. The S-scale is NOT linear: raw 160 is S9 and the top third of
+  // the range is the 60 dB above it, so the ticks are placed on the calibrated
+  // dB the host derives, never on raw.
+  Widget _meterCard() {
+    final tx = _rig?['tx'] == true;
+    final db = (_meters?['s_meter_db'] as num?)?.toInt();
+    final unit = _meters?['s_unit'] as String? ?? '';
+    final pwrPct = (_meters?['power_pct'] as num?)?.toDouble() ?? 0;
+    final swr = (_meters?['swr_ratio'] as num?)?.toDouble();
+    final alc = (_meters?['alc_pct'] as num?)?.toInt();
+
+    final double frac;
+    final String heading;
+    final String value;
+    final Color colour;
+    final List<(double, String)> ticks;
+
+    if (tx) {
+      heading = 'TRANSMIT';
+      frac = (pwrPct / 100).clamp(0.0, 1.0);
+      // ⚠️ PERCENT OF RATED OUTPUT, which is what the host actually derives -
+      // not watts. Multiplying it out would put a number on screen the radio
+      // never reported.
+      value = 'PWR ${pwrPct.round()}%'
+          '${swr != null ? "   SWR ${swr.toStringAsFixed(1)}" : ""}'
+          '${alc != null ? "   ALC $alc%" : ""}';
+      colour = T.amber;
+      ticks = const [(0.0, '0'), (0.25, '25'), (0.5, '50%'), (0.75, '75'), (1.0, '100')];
+    } else {
+      heading = 'SIGNAL';
+      frac = db == null ? 0 : ((db + 60) / 120.0).clamp(0.0, 1.0);
+      // ⚠️ Blank, not "S0", when the host could not read the meter. An S0 that
+      // was never measured looks exactly like a dead band.
+      value = (_stale || db == null) ? '—' : '$unit   $db dB';
+      colour = _stale ? T.amberDim : T.okGreen;
+      // ⚠️ THE TICKS SIT WHERE THE dB PUTS THEM. The bar runs -60..+60 dB
+      // relative to S9, and each S-unit is 6 dB: S1 is -48 dB, which is a tenth
+      // of the way along, NOT the left edge. Ticks drawn at even spacing would
+      // make the scale itself a lie, which is worse than no scale.
+      ticks = const [
+        (0.10, 'S1'), (0.20, '3'), (0.30, '5'), (0.40, '7'),
+        (0.50, 'S9'), (0.667, '+20'), (0.833, '+40'), (1.0, '+60'),
+      ];
+    }
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 7, 10, 5),
+      decoration: BoxDecoration(
+          color: T.ground,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: tx ? T.txRed : T.line)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text(heading, style: T.silk()),
+          const Spacer(),
+          Text(value,
+              style: TextStyle(
+                  fontFamily: T.mono, fontSize: 14, color: colour)),
+        ]),
+        const SizedBox(height: 5),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            value: _stale && !tx ? 0 : frac,
+            minHeight: 20,
+            backgroundColor: T.panelDeep,
+            valueColor: AlwaysStoppedAnimation(colour),
+          ),
+        ),
+        const SizedBox(height: 3),
+        SizedBox(height: 12, child: _scale(ticks)),
+      ]),
+    );
+  }
+
+  /// The tick marks under the meter. ⚠️ Inset at both ends, or the first and
+  /// last labels are half off the edge of the card.
+  Widget _scale(List<(double, String)> ticks) => LayoutBuilder(
+        builder: (context, box) {
+          const inset = 10.0;
+          final span = box.maxWidth - inset * 2;
+          return Stack(clipBehavior: Clip.none, children: [
+            for (final (frac, label) in ticks)
+              Positioned(
+                left: inset + span * frac - 14,
+                width: 28,
+                child: Column(children: [
+                  Container(width: 1, height: 3, color: T.line),
+                  Text(label,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          fontFamily: T.mono, fontSize: 8, color: T.dim)),
+                ]),
+              ),
+          ]);
+        },
+      );
+
+  // ── OPERATE ───────────────────────────────────────────────────────────
+  //
+  // ⚠️ COLUMNS, NOT FULL-WIDTH ROWS. Every group used to span the whole window
+  // with its buttons crammed to the left, which wasted two thirds of a wide
+  // screen and pushed the rest below the fold. The count comes from the width,
+  // so the same code is a three-column desk panel and a one-column tablet.
+  Widget _operate() => LayoutBuilder(builder: (context, box) {
+        final columns = box.maxWidth >= 1150 ? 3 : (box.maxWidth >= 780 ? 2 : 1);
+        final a = _colFrequency();
+        final b = _colVfo();
+        final c = _colReceiver();
+        if (columns == 3) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(flex: 135, child: a),
+              const SizedBox(width: 10),
+              Expanded(flex: 100, child: b),
+              const SizedBox(width: 10),
+              Expanded(flex: 115, child: c),
+            ]),
+          );
+        }
+        if (columns == 2) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(child: a),
+              const SizedBox(width: 10),
+              Expanded(child: Column(children: [b, const SizedBox(height: 10), c])),
+            ]),
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+          child: Column(children: [
+            a, const SizedBox(height: 10), b, const SizedBox(height: 10), c,
+          ]),
+        );
+      });
+
+  Widget _colFrequency() => _card([
+        _group('BAND'),
+        _grid(6, [
+          for (final b in const ['160', '80', '60', '40', '30', '20',
+            '17', '15', '12', '10', '6'])
+            _key(b, () => _send('/api/band/$b'),
+                on: _bandName((_rig?['freq'] as num?)?.toInt() ?? 0)
+                    .replaceAll('M', '') == b),
+        ]),
+        _group('MODE'),
+        _grid(6, [
+          for (final m in const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'])
+            _key(m, () => _send('/api/mode/${m.toLowerCase()}'),
+                on: '${_rig?['mode']}' == m),
+        ]),
+        _group('FILTER'),
+        // ⚠️ No selected state. The host does not report the current filter, and
+        // lighting one up would be a guess drawn as a reading.
+        _grid(3, [
+          _key('NARROW', () => _send('/api/width/narrow'), small: true),
+          _key('MED', () => _send('/api/width/medium'), small: true),
+          _key('WIDE', () => _send('/api/width/wide'), small: true),
+        ]),
+      ]);
+
+  Widget _colVfo() => _card([
+        _group('VFO'),
+        _grid(4, [
+          _key('A', () => _send('/api/vfo/a'), on: _rig?['vfo'] == 'A'),
+          _key('B', () => _send('/api/vfo/b'), on: _rig?['vfo'] == 'B'),
+          _key('SWAP', () => _send('/api/vfo/swap')),
+          _key('SPLIT', () => _send('/api/split/toggle'),
+              on: _rig?['split'] == true),
+          _key('A▸B', () => _send('/api/vfo-copy/a2b'), small: true),
+          _key('B▸A', () => _send('/api/vfo-copy/b2a'), small: true),
+          _key('QUICK', () => _send('/api/quick-split'), small: true),
+          _key('LOCK', () => _send('/api/toggle/lock'),
+              small: true, on: _rig?['vfo_locked'] == true),
+        ]),
+        _group('RIT'),
+        _grid(3, [
+          _key('−100', () => _send('/api/rit/down'), small: true),
+          _key('CLEAR', () => _send('/api/rit/clear'), small: true),
+          _key('+100', () => _send('/api/rit/up'), small: true),
+        ]),
+        // ⚠️ The step the ARROW KEYS move by, shown as a control rather than
+        // only as text - an operator who cannot see the hint line still has to
+        // know how far the next press goes.
+        _group('TUNING STEP'),
+        _grid(4, [
+          for (final s in const [10, 100, 1000, 10000])
+            _key(s >= 1000 ? '${s ~/ 1000} k' : '$s',
+                () => setState(() => _step = s),
+                small: true, on: _step == s),
+        ]),
+      ]);
+
+  Widget _colReceiver() => _card([
+        _group('RECEIVER'),
+        _grid(4, [
+          _key('AGC', () => _send('/api/agc/cycle'), small: true),
+          _key('PRE', () => _send('/api/preamp/cycle'), small: true),
+          _key('ANT', () => _send('/api/ant/toggle'), small: true),
+          _key('NOTCH', () => _send('/api/notch/toggle'), small: true),
+        ]),
+        const SizedBox(height: 2),
+        _levelSlider('AF', _af, 255, (v) => _send('/api/volume/set/$v'),
+            (v) => setState(() => _af = v)),
+        _levelSlider('RF', _rf, 255, (v) => _send('/api/rf-gain/set/$v'),
+            (v) => setState(() => _rf = v)),
+        _group('TRANSMIT'),
+        _levelSlider('PWR', (_rig?['power'] as num?)?.toInt() ?? 0, 100,
+            (v) => _send('/api/power/set/$v'),
+            (v) => setState(() => _rig = {...?_rig, 'power': v}),
+            colour: T.amber),
+        _grid(3, [
+          _key('MON', () => _send('/api/mon/toggle'), small: true),
+          _key('COMP', () => _send('/api/comp/toggle'), small: true),
+          _key('MIC…', () => setState(() => _surface = 1), small: true),
+        ]),
+      ]);
+
+  // ── SETUP: nothing here is touched during a contact ───────────────────
+  Widget _setup() => Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+        child: Column(children: [
+          _card([
+            _group('MICROPHONE'),
+            _micPicker(),
+            const SizedBox(height: 4),
+            Text(
+                _tx.status.isEmpty ? 'not started' : _tx.status,
+                style: const TextStyle(
+                    fontFamily: T.mono, fontSize: 10, color: T.dim)),
+          ]),
+          const SizedBox(height: 10),
+          _card([
+            _group('THIS STATION'),
+            Text(
+                'host ${_api?.base ?? "—"}\n'
+                'receive ${_rx.status}\n'
+                'transmit routing: '
+                '${_tx.radioRouting.isEmpty ? "not armed" : _tx.radioRouting}',
+                style: const TextStyle(
+                    fontFamily: T.mono, fontSize: 11, color: T.dim, height: 1.6)),
+          ]),
+        ]),
+      );
+
+  // ── Audio and the recorder ────────────────────────────────────────────
+  //
+  // ⚠️ THE LEVELS ARE THE POINT, SO THEY GET ROOM. They were 8 px slivers in a
+  // corner - and the level is the ONLY thing that tells a working microphone
+  // from a muted one, because a muted mic sends perfectly formed silence at
+  // exactly the right rate and every counter reads healthy.
+  //
+  // ⚠️ The recorder lives here and the microphone CHOOSER lives in SETUP: one
+  // is reached during a contact, the other is set once.
+  Widget _audioStrip() {
+    final recOn = _rec?['recording'] == true;
+    final recOK = _rec?['available'] == true;
+    final replay = _rec?['replay_seconds'] ?? 0;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+          color: T.panel,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: _sendingSilence ? T.txRed : T.line)),
+      child: LayoutBuilder(builder: (context, box) {
+        final wide = box.maxWidth > 820;
+        final meters = [
+          _bigLevel('RECEIVE', _rx.level, T.cyan,
+              _rx.playing ? null : 'not playing'),
+          _bigLevel('MICROPHONE', _tx.level,
+              _sendingSilence ? T.txRed : T.okGreen,
+              _tx.running ? (_sendingSilence ? 'SILENT' : null) : 'not armed'),
+        ];
+        final keys = [
+          _key(recOn ? '■ STOP' : '● RECORD',
+              recOK ? () => _send('/api/record/toggle') : null,
+              small: true, on: recOn, width: 118),
+          const SizedBox(width: 8),
+          _key('SAVE LAST ${replay}s',
+              recOK ? () => _send('/api/record/replay') : null,
+              small: true, width: 150),
+        ];
+        if (wide) {
+          return Row(children: [
+            Expanded(child: meters[0]),
+            const SizedBox(width: 18),
+            Expanded(child: meters[1]),
+            const SizedBox(width: 18),
+            ...keys,
+          ]);
+        }
+        return Column(children: [
+          meters[0],
+          const SizedBox(height: 6),
+          meters[1],
+          const SizedBox(height: 8),
+          Row(children: keys),
+        ]);
+      }),
+    );
+  }
+
+  Widget _bigLevel(String label, int pct, Color c, String? note) => Row(children: [
+        SizedBox(
+            width: 92,
+            child: Text(label, style: T.silk())),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: (pct / 100.0).clamp(0.0, 1.0),
+              minHeight: 14,
+              backgroundColor: T.ground,
+              valueColor: AlwaysStoppedAnimation(c),
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 74,
+          child: Text(note ?? '$pct%',
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                  fontFamily: T.mono,
+                  fontSize: 11,
+                  color: note == 'SILENT' ? T.txRed : (note == null ? c : T.dim))),
+        ),
+      ]);
+
+  // ── The transmit bar ──────────────────────────────────────────────────
+  //
+  // ⚠️ NOTHING HERE LOOKS LIKE ANYTHING ABOVE IT. ARM puts the operator's
+  // microphone on the air and used to be the same dark rounded rectangle as
+  // VOL+; in a wall of identical keys the one that matters is the one you hunt
+  // for. ARM states what it has done, PTT dominates, and each tuner names the
+  // box it keys and at what power.
+  Widget _transmitBar() {
+    final tx = _rig?['tx'] == true;
+    final armed = _tx.running;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 9, 14, 8),
+      decoration: BoxDecoration(
+          color: T.panelDeep,
+          border: Border(
+              top: BorderSide(color: tx ? T.txRed : T.line, width: 2))),
+      child: LayoutBuilder(builder: (context, box) {
+        final wide = box.maxWidth > 900;
+        final medium = box.maxWidth > 640;
+        return Column(children: [
+          if (_sendingSilence) ...[
+            _silenceAlarm(),
+            const SizedBox(height: 6),
+          ],
+          SizedBox(
+            height: 56,
+            child: Row(children: [
+              _stackedButton(
+                width: 118,
+                title: armed ? 'ARMED' : 'ARM',
+                sub: armed ? 'MIC LIVE' : 'MIC OFF AIR',
+                on: armed,
+                onTap: () async {
+                  if (_tx.running) {
+                    await _tx.stop();
+                    await _tx.startMonitor();
+                  } else {
+                    await _tx.start(_api!.base, _api!.token ?? '');
+                  }
+                  if (mounted) setState(() {});
+                },
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: tx ? T.txRed : T.panel,
+                      foregroundColor: tx ? Colors.white : T.text,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(6),
+                          side: BorderSide(color: tx ? T.txRed : T.line))),
+                  onPressed: () async {
+                    await _api!.send(tx ? '/api/ptt/off' : '/api/ptt/on');
+                    final st = await _api!.status();
+                    if (mounted && st != null) setState(() => _rig = st);
+                  },
+                  child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(tx ? 'ON AIR' : 'PTT',
+                            style: const TextStyle(
+                                fontFamily: T.mono,
+                                fontSize: 21,
+                                letterSpacing: 4)),
+                        const SizedBox(width: 12),
+                        Text(tx ? 'ESC OR SPACE TO STOP' : 'SPACE',
+                            style: TextStyle(
+                                fontFamily: T.mono,
+                                fontSize: 10,
+                                letterSpacing: 1,
+                                color: tx ? Colors.white70 : T.dim)),
+                      ]),
+                ),
+              ),
+              if (medium) ...[
+                const SizedBox(width: 10),
+                _stackedButton(
+                  width: 132,
+                  title: _tuning ? 'TUNING…' : 'TUNE',
+                  sub: 'TG-XL · 15 W',
+                  amber: _tuning,
+                  onTap: _tuning
+                      ? null
+                      : () async {
+                          await _api!.send('/api/tune/tgxl');
+                          if (mounted) setState(() => _tuning = true);
+                        },
+                ),
+              ],
+              if (wide) ...[
+                const SizedBox(width: 8),
+                _stackedButton(
+                  width: 132,
+                  title: 'ATU',
+                  sub: 'rig internal',
+                  onTap: _tuning ? null : () => _send('/api/tune'),
+                ),
+              ],
+            ]),
+          ),
+          const SizedBox(height: 5),
+          Row(children: [
+            Expanded(
+              child: Text(
+                  armed
+                      ? (_tx.radioRouting.isEmpty
+                          ? 'armed'
+                          : _tx.radioRouting)
+                      : 'not armed — the radio is using its own microphone',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      color: _tx.radioRouting.startsWith('⚠') ? T.txRed : T.dim)),
+            ),
+            if (_tunerMsg.isNotEmpty)
+              Text(_tunerMsg,
+                  style: TextStyle(
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      color: _tuning ? T.amber : T.dim)),
+          ]),
+        ]);
+      }),
+    );
+  }
+
+  /// A two-line button: what it is, and what it will do to the radio.
+  Widget _stackedButton({
+    required double width,
+    required String title,
+    required String sub,
+    VoidCallback? onTap,
+    bool on = false,
+    bool amber = false,
+  }) {
+    final border = amber ? T.amber : (on ? T.cyan : T.line);
+    final fg = amber ? T.amber : (on ? T.cyan : T.text);
+    return SizedBox(
+      width: width,
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+            backgroundColor: on ? T.cyanFill : T.panel,
+            foregroundColor: fg,
+            side: BorderSide(color: border),
+            padding: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6))),
+        onPressed: onTap,
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Text(title,
+              style: TextStyle(
+                  fontFamily: T.mono, fontSize: 13, letterSpacing: 1.4, color: fg)),
+          const SizedBox(height: 2),
+          Text(sub,
+              style: const TextStyle(
+                  fontFamily: T.mono, fontSize: 8, color: T.dim, letterSpacing: .6)),
+        ]),
+      ),
+    );
+  }
+
+  // ⚠️ SILENCE IS A FAULT AND IT MUST SHOUT. 1098 packets of perfect silence
+  // went to the transmitter under a lit ON AIR bar, because "mic 0%" is six
+  // quiet characters.
+  Widget _silenceAlarm() => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+            color: T.txRed.withValues(alpha: 0.22),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: T.txRed)),
+        child: Text(
+            '⚠  THE MICROPHONE IS SENDING SILENCE — ${_tx.packets} packets, all empty. '
+            'Pick a different microphone in SETUP.',
+            style: const TextStyle(
+                fontFamily: T.mono, fontSize: 10, color: T.txRed)),
+      );
+
+  // ── The pieces every card is built from ───────────────────────────────
+
+  Widget _card(List<Widget> children) => Container(
+        padding: const EdgeInsets.fromLTRB(10, 9, 10, 11),
+        decoration: BoxDecoration(
+            color: T.panel,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: T.line)),
+        child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: children),
+      );
+
+  Widget _group(String title) => Padding(
+        padding: const EdgeInsets.only(top: 2, bottom: 7),
+        child: Text(title, style: T.silk()),
+      );
+
+  /// A grid of equal keys. ⚠️ Equal, so a row of bands reads as one control
+  /// rather than as a ragged wrap - which is what the old Wrap produced the
+  /// moment a label was one character longer.
+  Widget _grid(int columns, List<Widget> keys) {
+    final rows = <Widget>[];
+    for (var i = 0; i < keys.length; i += columns) {
+      final slice = keys.sublist(i, (i + columns).clamp(0, keys.length));
+      rows.add(Padding(
+        padding: EdgeInsets.only(bottom: i + columns < keys.length ? 6 : 0),
+        child: Row(children: [
+          for (var c = 0; c < columns; c++) ...[
+            if (c > 0) const SizedBox(width: 6),
+            Expanded(child: c < slice.length ? slice[c] : const SizedBox()),
+          ],
+        ]),
+      ));
+    }
+    return Column(children: rows);
+  }
+
+  /// ⚠️ A null onTap DISABLES rather than hides. A control that vanishes when a
+  /// feature is unavailable leaves the operator wondering where it went.
+  Widget _key(String label, VoidCallback? tap,
+          {bool on = false, bool small = false, double? width}) =>
+      SizedBox(
+        width: width,
+        height: small ? 38 : 44,
+        child: OutlinedButton(
+          style: OutlinedButton.styleFrom(
+              backgroundColor: on ? T.cyanFill : T.panelDeep,
+              foregroundColor: on ? T.cyan : T.text,
+              // ⚠️ A disabled control still has to be legible: greyed means
+              // "not available here", blank means "this panel is broken".
+              disabledForegroundColor: T.dim,
+              side: BorderSide(color: on ? T.cyan : T.line),
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5))),
+          onPressed: tap,
+          child: Text(label,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.fade,
+              style: TextStyle(
+                  fontSize: small ? 11 : 12,
+                  letterSpacing: .5,
+                  color: on ? T.cyan : null)),
+        ),
+      );
+
+  /// A labelled slider that sends on RELEASE.
+  ///
+  /// ⚠️ ON RELEASE, NEVER PER FRAME. A slider that fires on every drag frame
+  /// puts a hundred CAT writes on a serial port that answers one at a time, and
+  /// the radio ends up wherever the queue drained to rather than where the
+  /// operator let go.
+  Widget _levelSlider(String label, int value, int max,
+          Future<void> Function(int) send, void Function(int) local,
+          {Color colour = T.cyan}) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 2),
+        child: Row(children: [
+          SizedBox(
+            width: 62,
+            child: Text('$label $value',
+                style: const TextStyle(
+                    fontFamily: T.mono, fontSize: 10, color: T.dim)),
+          ),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                  trackHeight: 4,
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7)),
+              child: Slider(
+                value: value.toDouble().clamp(0, max.toDouble()),
+                max: max.toDouble(),
+                activeColor: colour,
+                inactiveColor: T.line,
+                onChanged: (v) => local(v.round()),
+                onChangeEnd: (v) async {
+                  await send(v.round());
+                  final st = await _api!.status();
+                  if (mounted && st != null) setState(() => _rig = st);
+                },
+              ),
+            ),
+          ),
+        ]),
+      );
+
+  /// Send, then refresh what the radio says. ⚠️ The reading comes from the rig,
+  /// never from "the button was pressed".
+  Future<void> _send(String path) async {
+    await _api!.send(path);
+    final st = await _api!.status();
+    if (mounted && st != null) setState(() => _rig = st);
   }
 
   String _bandName(int hz) {
@@ -726,531 +1415,6 @@ class _PanelState extends State<Panel> {
     // ⚠️ Out of band says so rather than picking the nearest. "Which band am I
     // on" answered with a guess is worse than answered with a warning.
     return 'OUT OF BAND';
-  }
-
-  String _fmt(int hz) {
-    if (hz <= 0) return '—';
-    final s = hz.toString().padLeft(9, '0');
-    return '${int.parse(s.substring(0, 3))}.${s.substring(3, 6)}.${s.substring(6)}';
-  }
-
-  // ── OPERATE: everything reached during a contact, one click deep ──────────
-  Widget _operate() => Column(children: [
-        const SizedBox(height: 8),
-        // ⚠️ BAND GETS ITS OWN FULL-WIDTH ROW. Squeezed into a column beside
-        // the VFO block it wrapped to two ragged rows and pushed MODE into a
-        // narrow indented strip that looked like a rendering fault. Eleven bands
-        // is a row; that is what the row is for.
-        _keys('BAND', const ['160', '80', '60', '40', '30', '20', '17',
-            '15', '12', '10', '6'], (b) => '/api/band/$b',
-            selected: _bandName((_rig?['freq'] as num?)?.toInt() ?? 0)
-                .replaceAll('M', '')),
-        const SizedBox(height: 8),
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Expanded(
-            child: _keys('MODE', const ['LSB', 'USB', 'CW', 'AM', 'FM', 'DATA'],
-                (m) => '/api/mode/$m', selected: '${_rig?['mode']}'),
-          ),
-          Expanded(
-            child: _group('VFO', [
-              _btn('A', () => _api!.send('/api/vfo/a')),
-              _btn('B', () => _api!.send('/api/vfo/b')),
-              _btn('SWAP', () => _api!.send('/api/vfo/swap')),
-              _btn('A▸B', () => _api!.send('/api/vfo-copy/a2b')),
-              _btn('B▸A', () => _api!.send('/api/vfo-copy/b2a')),
-              _btn('SPLIT', () => _api!.send('/api/split/toggle'),
-                  on: _rig?['split'] == true),
-              _btn('QUICK', () => _api!.send('/api/quick-split')),
-              _btn('LOCK', () => _api!.send('/api/toggle/lock'),
-                  on: _rig?['vfo_locked'] == true),
-            ]),
-          ),
-        ]),
-        const SizedBox(height: 8),
-        _group('RECEIVER', [
-          _btn('AGC', () => _api!.send('/api/agc/cycle')),
-          _btn('PRE', () => _api!.send('/api/preamp/cycle')),
-          _btn('ANT', () => _api!.send('/api/ant/toggle')),
-          _btn('NOTCH', () => _api!.send('/api/notch/toggle')),
-          _btn('MON', () => _api!.send('/api/mon/toggle')),
-          _btn('COMP', () => _api!.send('/api/comp/toggle')),
-          _btn('NARROW', () => _api!.send('/api/width/narrow')),
-          _btn('MED', () => _api!.send('/api/width/medium')),
-          _btn('WIDE', () => _api!.send('/api/width/wide')),
-          _btn('VOL −', () => _api!.send('/api/volume/down')),
-          _btn('VOL +', () => _api!.send('/api/volume/up')),
-        ]),
-        const SizedBox(height: 8),
-        // ⚠️ RIT IS PINNED HERE, not in Setup. Chasing a station that is
-        // drifting is a mid-contact job; a control you need mid-over does not
-        // live behind a tab.
-        _group('RIT  ·  STEP', [
-          _btn('RIT −', () => _api!.send('/api/rit/down')),
-          _btn('RIT +', () => _api!.send('/api/rit/up')),
-          _btn('CLR', () => _api!.send('/api/rit/clear')),
-          _btn('−1 k', () => _stepBy(1000, 'down')),
-          _btn('+1 k', () => _stepBy(1000, 'up')),
-          _btn('−100', () => _stepBy(100, 'down')),
-          _btn('+100', () => _stepBy(100, 'up')),
-        ]),
-        const SizedBox(height: 8),
-        _powerRow(),
-        const SizedBox(height: 10),
-      ]);
-
-  // ── SETUP: nothing here is touched during a contact ───────────────────────
-  Widget _setup() => Column(children: [
-        const SizedBox(height: 8),
-        _micPicker(),
-        _recRow(),
-        const SizedBox(height: 8),
-        _group('THIS STATION', [], note: ''),
-        const SizedBox(height: 10),
-      ]);
-
-
-  // ── The transmit bar: pinned, on every surface ───────────────────────────
-  //
-  // ⚠️ THE ONE PLACE NOTHING MAY EVER SCROLL AWAY FROM. Remote control means
-  // being able to end a transmission immediately, and the first version of this
-  // panel put PTT below the fold on a short window - an armed transmitter you
-  // could not unkey from the panel. It is fixed here, on both surfaces, and the
-  // keypad floats over the rest of the screen rather than covering it.
-  //
-  // ⚠️ IT GIVES WAY IN A FIXED ORDER when the window is narrow: the meters go
-  // first, then the status text, then the tuner labels shorten. PTT is the last
-  // thing to shrink, because the key that goes off the edge of a transmit bar is
-  // the one somebody needs in a hurry.
-  Widget _transmitBar() {
-    final tx = _rig?['tx'] == true;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-      decoration: BoxDecoration(
-          // Opaque. A transparent bar let the panel scroll visibly underneath
-          // the transmit keys, which reads as the keys moving.
-          color: T.panelDeep,
-          border: Border(top: BorderSide(color: tx ? T.txRed : T.line, width: tx ? 2 : 1))),
-      child: LayoutBuilder(builder: (context, box) {
-        final wide = box.maxWidth > 900;
-        final medium = box.maxWidth > 640;
-        return Column(children: [
-          if (_sendingSilence) ...[
-            _silenceAlarm(),
-            const SizedBox(height: 6),
-          ],
-          Row(children: [
-            SizedBox(
-              width: 92,
-              height: 46,
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                    backgroundColor: _tx.running ? T.cyanFill : T.panel,
-                    foregroundColor: _tx.running ? T.cyan : T.text,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(5),
-                        side: BorderSide(color: _tx.running ? T.cyan : T.line))),
-                onPressed: () async {
-                  if (_tx.running) {
-                    await _tx.stop();
-                    await _tx.startMonitor();
-                  } else {
-                    await _tx.start(_api!.base, _api!.token ?? '');
-                  }
-                  if (mounted) setState(() {});
-                },
-                child: Text(_tx.running ? 'ARMED' : 'ARM',
-                    style: const TextStyle(letterSpacing: 1.2, fontSize: 12)),
-              ),
-            ),
-            const SizedBox(width: 8),
-            // PTT: the widest thing in the bar, and the last to give way.
-            Expanded(
-              flex: 3,
-              child: SizedBox(
-                height: 46,
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                      backgroundColor: tx ? T.txRed : T.panel,
-                      foregroundColor: tx ? Colors.white : T.text,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(5),
-                          side: BorderSide(color: tx ? T.txRed : T.line))),
-                  onPressed: () async {
-                    await _api!.send(tx ? '/api/ptt/off' : '/api/ptt/on');
-                    final st = await _api!.status();
-                    if (mounted && st != null) setState(() => _rig = st);
-                  },
-                  child: Text(tx ? 'ON AIR  —  TAP TO STOP' : 'PTT',
-                      style: const TextStyle(letterSpacing: 2, fontSize: 14)),
-                ),
-              ),
-            ),
-            if (medium) ...[
-              const SizedBox(width: 8),
-              SizedBox(
-                width: wide ? 128 : 96,
-                height: 46,
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                      backgroundColor: _tuning ? T.amber : T.panel,
-                      foregroundColor: _tuning ? T.ground : T.text,
-                      side: BorderSide(color: _tuning ? T.amber : T.line),
-                      padding: EdgeInsets.zero,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(5))),
-                  onPressed: _tuning ? null : () async {
-                    await _api!.send('/api/tune/tgxl');
-                    if (mounted) setState(() => _tuning = true);
-                  },
-                  child: Text(_tuning ? 'TUNING…' : (wide ? 'TUNE TG-XL' : 'TUNE'),
-                      style: const TextStyle(letterSpacing: 1, fontSize: 11)),
-                ),
-              ),
-            ],
-            if (wide) ...[
-              const SizedBox(width: 6),
-              SizedBox(
-                width: 88,
-                height: 46,
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                      backgroundColor: T.panel,
-                      foregroundColor: T.text,
-                      side: const BorderSide(color: T.line),
-                      padding: EdgeInsets.zero,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(5))),
-                  onPressed: _tuning ? null : () => _api!.send('/api/tune'),
-                  child: const Text('RIG ATU',
-                      style: TextStyle(letterSpacing: 1, fontSize: 11)),
-                ),
-              ),
-            ],
-            if (wide) ...[
-              const SizedBox(width: 10),
-              // ⚠️ MIC AND RECEIVE LEVEL LIVE HERE, next to the key. Setting
-              // drive means watching a level while you talk, and the level was
-              // three scrolls away from the button that puts you on the air.
-              SizedBox(
-                width: 150,
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  _levelStrip('MIC', _tx.level, _sendingSilence ? T.txRed : T.okGreen),
-                  const SizedBox(height: 4),
-                  _levelStrip('RX', _rx.level, T.cyan),
-                ]),
-              ),
-            ],
-          ]),
-          if (!wide) ...[
-            const SizedBox(height: 6),
-            Row(children: [
-              Expanded(child: _levelStrip('MIC', _tx.level,
-                  _sendingSilence ? T.txRed : T.okGreen)),
-              const SizedBox(width: 8),
-              Expanded(child: _levelStrip('RX', _rx.level, T.cyan)),
-            ]),
-          ],
-          const SizedBox(height: 4),
-          Row(children: [
-            Expanded(
-              child: Text(
-                  _tx.running ? _tx.radioRouting : 'not armed — the radio keeps its own microphone',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontFamily: T.mono,
-                      fontSize: 9,
-                      color: _tx.radioRouting.startsWith('⚠') ? T.txRed : T.dim)),
-            ),
-            if (_tunerMsg.isNotEmpty)
-              Text(_tunerMsg,
-                  style: TextStyle(
-                      fontFamily: T.mono,
-                      fontSize: 9,
-                      color: _tuning ? T.amber : T.dim)),
-          ]),
-        ]);
-      }),
-    );
-  }
-
-  Widget _levelStrip(String label, int pct, Color c) => Row(children: [
-        SizedBox(
-            width: 26,
-            child: Text(label,
-                style: const TextStyle(
-                    fontFamily: T.mono, fontSize: 9, color: T.dim))),
-        Expanded(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(2),
-            child: LinearProgressIndicator(
-              value: (pct / 100.0).clamp(0.0, 1.0),
-              minHeight: 7,
-              backgroundColor: T.ground,
-              valueColor: AlwaysStoppedAnimation(c),
-            ),
-          ),
-        ),
-      ]);
-
-  // ⚠️ SILENCE IS A FAULT AND IT MUST SHOUT. 1098 packets of perfect silence
-  // went to the transmitter under a lit ON AIR bar, because "mic 0%" is six
-  // quiet characters. A muted microphone, a webcam picked as the system default
-  // and a working operator all produce frames at exactly the right rate.
-  Widget _silenceAlarm() => Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-            color: T.txRed.withValues(alpha: 0.22),
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: T.txRed)),
-        child: Text(
-            '⚠  THE MICROPHONE IS SENDING SILENCE — ${_tx.packets} packets, all empty. '
-            'Pick a different microphone in SETUP.',
-            style: const TextStyle(
-                fontFamily: T.mono, fontSize: 10, color: T.txRed)),
-      );
-
-  Widget _meter() {
-    // ⚠️ THE S-METER IS NOT LINEAR AND S9 IS NOT TWO-THIRDS OF THE WAY UP. This
-    // drew raw/255, which is what the C++ host wrote down as wrong: raw 160 is
-    // S9 and the whole top third of the raw range is the 60 dB above it, so a
-    // genuine S9 sat at 63% and an S3 at a fifth. The bar now runs on the
-    // calibrated dB the host derives, and the number beside it is what an
-    // operator would actually say out loud.
-    final db = (_meters?['s_meter_db'] as num?)?.toInt();
-    final unit = _meters?['s_unit'] as String? ?? '';
-    final frac = db == null ? 0.0 : ((db + 60) / 120.0).clamp(0.0, 1.0);
-    final tx = _rig?['tx'] == true;
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 10),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-          color: T.ground,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: tx ? T.txRed : T.line)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Text(tx ? 'TRANSMIT' : 'SIGNAL', style: T.silk()),
-          const Spacer(),
-          // ⚠️ Blank, not "S0", when the host could not read the meter. An S0
-          // that was never measured looks exactly like a dead band.
-          Text(_stale || db == null ? '—' : unit,
-              style: TextStyle(
-                  fontFamily: T.mono,
-                  fontSize: 13,
-                  color: _stale ? T.amberDim : T.okGreen)),
-        ]),
-        const SizedBox(height: 6),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(3),
-          child: LinearProgressIndicator(
-            value: _stale ? 0 : frac,
-            minHeight: 14,
-            backgroundColor: T.panelDeep,
-            valueColor: AlwaysStoppedAnimation(_stale ? T.amberDim : T.okGreen),
-          ),
-        ),
-        // ⚠️ THE TRANSMIT METERS ONLY EXIST WHILE KEYED. Drawing SWR while
-        // receiving shows a flat 1.0 as though it had been measured - a perfect
-        // match reported by a radio that is not transmitting.
-        if (tx) ...[
-          const SizedBox(height: 8),
-          Row(children: [
-            _txMeter('SWR',
-                (_meters?['swr_ratio'] as num?)?.toDouble().toStringAsFixed(1) ?? '—',
-                // SWR 1.0 is the left end and 5.0 the right; ?? binds looser
-                // than -, so the parentheses are load-bearing.
-                ((((_meters?['swr_ratio'] as num?)?.toDouble()) ?? 1.0) - 1.0) / 4.0),
-            const SizedBox(width: 10),
-            _txMeter('ALC', '${_meters?['alc_pct'] ?? '—'}%',
-                ((_meters?['alc_pct'] as num?)?.toDouble() ?? 0) / 100.0),
-            const SizedBox(width: 10),
-            _txMeter('PWR', '${_meters?['power_pct'] ?? '—'}%',
-                ((_meters?['power_pct'] as num?)?.toDouble() ?? 0) / 100.0),
-          ]),
-        ],
-      ]),
-    );
-  }
-
-  Widget _txMeter(String label, String value, double frac) => Expanded(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Text(label, style: T.silk()),
-            const Spacer(),
-            Text(value,
-                style: const TextStyle(
-                    fontFamily: T.mono, fontSize: 11, color: T.amber)),
-          ]),
-          const SizedBox(height: 3),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(2),
-            child: LinearProgressIndicator(
-              value: frac.clamp(0.0, 1.0),
-              minHeight: 8,
-              backgroundColor: T.panelDeep,
-              valueColor: const AlwaysStoppedAnimation(T.amber),
-            ),
-          ),
-        ]),
-      );
-
-  Widget _powerRow() {
-    final w = (_rig?['power'] as num?)?.toInt() ?? 0;
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 10),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-          color: T.panel,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: T.line)),
-      child: Row(children: [
-        Text('POWER', style: T.silk()),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 62,
-          child: Text('$w W',
-              style: const TextStyle(
-                  fontFamily: T.mono, fontSize: 16, color: T.amber)),
-        ),
-        Expanded(
-          child: Slider(
-            value: w.clamp(0, 100).toDouble(),
-            max: 100,
-            divisions: 20,
-            activeColor: T.amber,
-            inactiveColor: T.line,
-            label: '$w W',
-            // ⚠️ Sent on RELEASE, not on every drag frame. A slider that fires
-            // per frame puts a hundred CAT writes on a serial port that answers
-            // one at a time, and the radio ends up wherever the queue drained
-            // to rather than where the operator let go.
-            onChanged: (v) => setState(
-                () => _rig = {...?_rig, 'power': v.round()}),
-            onChangeEnd: (v) async {
-              await _api!.send('/api/power/set/${v.round()}');
-              final st = await _api!.status();
-              if (mounted && st != null) setState(() => _rig = st);
-            },
-          ),
-        ),
-      ]),
-    );
-  }
-
-
-  // ── VFO, RIT and the receiver controls ──────────────────────────────────
-  //
-  Widget _recRow() {
-    final on = _rec?['recording'] == true;
-    final avail = _rec?['available'] == true;
-    return _group('RECORDING', [
-      _btn(on ? 'STOP' : 'RECORD',
-          avail ? () => _api!.send('/api/record/toggle') : null,
-          on: on),
-      _btn('SAVE LAST ${_rec?['replay_seconds'] ?? 0}s',
-          avail ? () => _api!.send('/api/record/replay') : null),
-    ], note: avail
-        ? (on ? 'recording · ${_rec?['seconds'] ?? 0}s' : (_rec?['message'] as String? ?? ''))
-        : (_rec?['message'] as String? ?? 'not available on this host'));
-  }
-
-  Future<void> _stepBy(int hz, String dir) async {
-    await _api!.send('/api/step/$hz/$dir');
-    final s = await _api!.status();
-    if (mounted && s != null) setState(() => _rig = s);
-  }
-
-  Widget _group(String title, List<Widget> children, {String note = ''}) =>
-      Container(
-        margin: const EdgeInsets.symmetric(horizontal: 10),
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-            color: T.panel,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: T.line)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Text(title, style: T.silk()),
-            const Spacer(),
-            if (note.isNotEmpty)
-              Text(note,
-                  style: const TextStyle(
-                      fontFamily: T.mono, fontSize: 10, color: T.dim)),
-          ]),
-          const SizedBox(height: 8),
-          Wrap(spacing: 8, runSpacing: 8, children: children),
-        ]),
-      );
-
-  // ⚠️ A null onPressed DISABLES the button rather than hiding it. A control
-  // that vanishes when a feature is unavailable leaves the operator wondering
-  // whether they misremembered where it was.
-  // ⚠️ SIZED TO ITS TEXT, with a floor. A fixed 92 px broke "PREAMP" into
-  // "PREA MP" and "NOTCH" into "NOTC H" - a control panel whose labels are cut
-  // in half mid-word reads as broken before anybody presses anything, and the
-  // widths are not knowable in advance because they change with the label.
-  Widget _btn(String label, VoidCallback? tap, {bool on = false}) => ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 78, minHeight: 40, maxHeight: 40),
-        child: OutlinedButton(
-          style: OutlinedButton.styleFrom(
-              backgroundColor: on ? T.cyanFill : T.panelDeep,
-              foregroundColor: on ? T.cyan : T.text,
-              side: BorderSide(color: on ? T.cyan : T.line),
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5))),
-          onPressed: tap == null ? null : () async {
-            tap();
-            final s = await _api!.status();
-            if (mounted && s != null) setState(() => _rig = s);
-          },
-          child: Text(label,
-              maxLines: 1,
-              softWrap: false,
-              style: const TextStyle(letterSpacing: 0.6, fontSize: 12)),
-        ),
-      );
-
-  Widget _keys(String title, List<String> labels, String Function(String) path,
-      {String? selected}) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 10),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-          color: T.panel,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: T.line)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title, style: T.silk()),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: labels.map((l) {
-            final on = selected == l;
-            return SizedBox(
-              width: 92,
-              height: 44,
-              child: OutlinedButton(
-                style: OutlinedButton.styleFrom(
-                    backgroundColor: on ? T.cyanFill : T.panelDeep,
-                    foregroundColor: on ? T.cyan : T.text,
-                    side: BorderSide(color: on ? T.cyan : T.line),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(5))),
-                onPressed: () async {
-                  await _api!.send(path(l.toLowerCase()));
-                  final s = await _api!.status();
-                  if (mounted && s != null) setState(() => _rig = s);
-                },
-                child: Text(l, style: const TextStyle(letterSpacing: 1)),
-              ),
-            );
-          }).toList(),
-        ),
-      ]),
-    );
   }
 }
 
