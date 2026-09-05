@@ -6,10 +6,15 @@ name: build
 # been shown tonight to mean nothing: the browser fix crashed the Linux desktop
 # app on its first frame while every build was green.
 
+# ⚠️ TAGS, NOT EVERY PUSH. This repo's origin is git.wa0o.com now; GitHub only
+# ever receives a release (see tools/release.sh). Building on every push to main
+# was billing Actions minutes against a PRIVATE repo's quota for commits nobody
+# outside the house could even see - and it exhausted the month's allowance by
+# the 5th. A tag is a release, and a release is exactly when installers are
+# wanted, so the desktop builds run then without anybody remembering to ask.
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       desktop:
@@ -83,7 +88,9 @@ jobs:
   # is something to ship:
   #     gh workflow run build.yml -f desktop=true
   panel:
-    if: github.event_name == 'workflow_dispatch' && inputs.desktop
+    # A tag builds the installers; a manual run builds them only if asked,
+    # because macOS bills at 10x and Windows at 2x.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.desktop)
     strategy:
       fail-fast: false
       matrix:
