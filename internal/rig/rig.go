@@ -48,14 +48,14 @@ type Snapshot struct {
 	// Ported from the C++ host, which carries them for a reason: a noise blanker
 	// that is on and a panel that cannot say so is how an operator spends ten
 	// minutes wondering why a signal sounds wrong.
-	NB     bool `json:"nb"`
-	NR     bool `json:"nr"`
-	Att    int  `json:"att"`
-	XIT    bool `json:"xit"`
-	Muted  bool `json:"muted"`
-	Diversity   bool   `json:"diversity"`
-	AmpTuning   bool   `json:"amp_tuning"`
-	TgxlTune    bool   `json:"tgxl_tuning"`
+	NB        bool `json:"nb"`
+	NR        bool `json:"nr"`
+	Att       int  `json:"att"`
+	XIT       bool `json:"xit"`
+	Muted     bool `json:"muted"`
+	Diversity bool `json:"diversity"`
+	AmpTuning bool `json:"amp_tuning"`
+	TgxlTune  bool `json:"tgxl_tuning"`
 	// ⚠️ How old this reading is. The C++ host learned the hard way that a stale
 	// cache looks exactly like a live one; the age travels WITH the data so a
 	// client cannot forget to ask.

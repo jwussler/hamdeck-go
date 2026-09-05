@@ -1,8 +1,11 @@
 import 'dart:async';
 
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
+
+import 'keystate/keystate.dart';
 
 /// The system-wide push-to-talk key.
 ///
@@ -64,6 +67,10 @@ class GlobalPtt {
     ('F12', '⚠ commonly bound — this WILL stop F12 working in other apps'),
   ];
 
+  /// The key behind a name, for the chooser and for the test that proves none
+  /// of them can crash.
+  static KeyboardKey? keyFor(String name) => _keys[name];
+
   static final _keys = <String, PhysicalKeyboardKey>{
     'F13': PhysicalKeyboardKey.f13,
     'F14': PhysicalKeyboardKey.f14,
@@ -75,6 +82,17 @@ class GlobalPtt {
   };
 
   HotKey? _registered;
+  // ⚠️ WHAT THE PLATFORM HAS ACTUALLY BEEN TOLD, tracked here rather than
+  // inferred. The Windows plugin unregisters with `hotkey_id_map_.at(id)` -
+  // std::map::at THROWS when the id is absent, and an uncaught C++ exception in
+  // a Flutter plugin takes the whole app down. Unregistering twice, or
+  // unregistering something that never registered, is therefore a crash, and
+  // this app could do both: startup restore racing the chooser, and dispose
+  // racing quit-from-tray.
+  bool _platformHolds = false;
+  // Serialises use()/unregister(), because the same race is what produced the
+  // double unregister in the first place.
+  Future<void> _work = Future<void>.value();
   String _keyName = 'Off';
   bool _hold = true;
   bool _down = false;
@@ -91,10 +109,23 @@ class GlobalPtt {
 
   bool get active => _registered != null;
 
+  /// Can this platform tell us when the key is RELEASED?
+  ///
+  /// ⚠️ macOS delivers a real key-up event. Windows does not - its plugin emits
+  /// only onKeyDown - so hold there is built on GetAsyncKeyState polling
+  /// instead. Linux delivers neither, so it gets toggle and is told so. A panel
+  /// that offers hold where no release can arrive is a stuck transmitter with a
+  /// friendly label.
+  bool get canHold => (defaultTargetPlatform == TargetPlatform.macOS) || KeyState.instance.available;
+
   /// Register, or move to, a key. "Off" unregisters.
-  Future<void> use(String name, {required bool hold}) async {
-    _hold = hold;
-    await unregister();
+  Future<void> use(String name, {required bool hold}) =>
+      _work = _work.then((_) => _use(name, hold: hold));
+
+  Future<void> _use(String name, {required bool hold}) async {
+    // ⚠️ Hold is only ever armed where a release can actually reach us.
+    _hold = hold && canHold;
+    await _unregister();
     _keyName = name;
     if (name == 'Off' || !_keys.containsKey(name)) {
       _status = 'no system-wide key — the panel must have focus';
@@ -112,29 +143,55 @@ class GlobalPtt {
       await hotKeyManager.register(
         hk,
         keyDownHandler: (_) => _pressed(),
-        keyUpHandler: _hold ? (_) => _released('key released') : null,
+        // ⚠️ Only where the platform sends one. Windows never does.
+        keyUpHandler:
+            (_hold && (defaultTargetPlatform == TargetPlatform.macOS)) ? (_) => _released('key released') : null,
       );
       _registered = hk;
-      _status = _hold
-          ? 'system-wide, hold — $name works with any window focused'
-          : 'system-wide, toggle — press $name to key, press again to unkey';
+      _platformHolds = true;
+      if (_hold) {
+        _status = (defaultTargetPlatform == TargetPlatform.macOS)
+            ? 'system-wide, hold — $name works with any window focused'
+            : 'system-wide, hold — $name, release detected by key-state polling';
+      } else {
+        _status = hold && !canHold
+            // ⚠️ Say WHY it is not hold, or the operator assumes the setting
+            // did not take.
+            ? 'system-wide, toggle — this platform sends no key release, '
+                'so hold is not offered. Press $name to key, again to unkey'
+            : 'system-wide, toggle — press $name to key, press again to unkey';
+      }
     } catch (e) {
       // ⚠️ Registration is REFUSED when another application already owns the
       // key. Say which, and say what the panel can still do - a status line that
       // claims a key it does not have is how an operator finds out mid-net.
       _registered = null;
+      _platformHolds = false;
       _status = '$name is already taken by another application — '
           'the panel must have focus, or choose another key';
     }
     onChanged();
   }
 
-  Future<void> unregister() async {
+  Future<void> unregister() => _work = _work.then((_) => _unregister());
+
+  Future<void> _unregister() async {
     _limit?.cancel();
     _limit = null;
-    if (_registered != null) {
-      await hotKeyManager.unregister(_registered!);
-      _registered = null;
+    _poll?.cancel();
+    _poll = null;
+    final hk = _registered;
+    // ⚠️ CLEARED BEFORE THE AWAIT, and only unregistered if the platform is
+    // actually holding it. Two calls that both see a non-null field and both
+    // reach the plugin is the std::out_of_range crash.
+    _registered = null;
+    if (hk != null && _platformHolds) {
+      _platformHolds = false;
+      try {
+        await hotKeyManager.unregister(hk);
+      } catch (_) {
+        // Already gone. Not a fault, and never worth taking the app down for.
+      }
     }
     if (_down) {
       _down = false;
@@ -163,7 +220,26 @@ class GlobalPtt {
     await onDown();
   }
 
+  Timer? _poll;
+
+  /// ⚠️ THE RELEASE, WHERE THE PLATFORM WILL NOT SEND ONE. 25 ms is fast enough
+  /// that the tail of an over is not clipped and slow enough to cost nothing.
+  /// It asks about ONE key - the one the operator nominated - and can learn
+  /// nothing else about the keyboard.
+  void _watchForRelease() {
+    _poll?.cancel();
+    if (!_hold || (defaultTargetPlatform == TargetPlatform.macOS) || !KeyState.instance.available) return;
+    _poll = Timer.periodic(const Duration(milliseconds: 25), (t) {
+      final down = KeyState.instance.isDown(_keyName);
+      if (down == false) {
+        t.cancel();
+        _released('key released');
+      }
+    });
+  }
+
   void _arm() {
+    _watchForRelease();
     _limit?.cancel();
     _limit = Timer(holdLimit, () {
       // ⚠️ The panel says it was THIS limit, not the host's. Two safeguards that

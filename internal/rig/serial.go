@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.bug.st/serial"
@@ -49,6 +50,19 @@ type Serial struct {
 	// AF gain before a mute, so unmuting puts back what was there rather than a
 	// number this program chose. Ported from the C++ host.
 	preMuteAF int
+	// ⚠️ HOW MANY OPERATOR COMMANDS ARE WAITING FOR THE SERIAL LINE.
+	//
+	// The poll loop asks the radio eight or twelve questions every 250 ms and
+	// holds the exchange lock across each one. A PTT press arriving mid-cycle
+	// therefore waited for the rest of that cycle before a single byte reached
+	// the rig - hundreds of milliseconds between pressing the key and the
+	// transmitter coming up, on a LAN with a 2 ms round trip. The operator feels
+	// that as "the panel is laggy"; it was never the network.
+	//
+	// So the poller yields: between questions it checks this, and if somebody is
+	// waiting it abandons the rest of the cycle. A reading half a second old has
+	// never cost anybody a contact; a late PTT costs the start of every over.
+	waiting atomic.Int32
 }
 
 func OpenSerial(dev string, baud int) (*Serial, error) {
@@ -150,6 +164,12 @@ func (s *Serial) askOnce(cmd string) (string, error) {
 	return "", fmt.Errorf("no answer to %q", cmd)
 }
 
+// errYielded marks a reading skipped because the operator was waiting. ⚠️ The
+// value is then LEFT ALONE rather than zeroed - a meter that reads 0 because
+// nobody asked is the confident wrong answer this project keeps writing rules
+// about.
+var errYielded = fmt.Errorf("skipped: an operator command was waiting")
+
 var modeByCode = map[byte]string{
 	'1': "LSB", '2': "USB", '3': "CW", '4': "FM", '5': "AM", '8': "DATA", 'C': "DATA",
 }
@@ -178,11 +198,31 @@ func (s *Serial) pollLoop() {
 // same questions at different offsets, and that is a table to fill in rather
 // than a parser to rewrite.
 func (s *Serial) pollOnce() {
-	freq, ferr := s.ask("FA;")  // VFO A frequency, 9 digits at offset 2
+	// ⚠️ YIELD BETWEEN QUESTIONS. Every one of these holds the serial line, and
+	// an operator command that arrives mid-cycle must not wait for the rest of
+	// it. This is the difference between a PTT that keys when you press it and
+	// one that keys a third of a second later.
+	yield := func() bool { return s.waiting.Load() > 0 }
+	if yield() {
+		return
+	}
+	freq, ferr := s.ask("FA;") // VFO A frequency, 9 digits at offset 2
+	if yield() {
+		return
+	}
 	mode, merr := s.ask("MD0;") // mode code, 1 char at offset 3
+	if yield() {
+		return
+	}
 	smtr, serr := s.ask("SM0;") // S-meter, 3 digits at offset 3
-	pwr, perr := s.ask("PC;")   // power setting, 3 digits at offset 2
-	tx, terr := s.ask("TX;")    // transmit flag, 1 char at offset 2
+	if yield() {
+		return
+	}
+	pwr, perr := s.ask("PC;") // power setting, 3 digits at offset 2
+	if yield() {
+		return
+	}
+	tx, terr := s.ask("TX;") // transmit flag, 1 char at offset 2
 
 	// ⚠️ THE TRANSMIT METERS, AND THEY ONLY MEAN ANYTHING WHILE KEYED. They were
 	// never read at all before, so swr, alc and the power meter were reported as
@@ -198,16 +238,24 @@ func (s *Serial) pollOnce() {
 	s.mu.Unlock()
 	var nb, nr, att, xit string
 	var nbe, nre, atte, xite error
-	if slow {
+	if slow && !yield() {
 		nb, nbe = s.ask("NB0;")
 		nr, nre = s.ask("NR0;")
 		att, atte = s.ask("RA0;")
 		xit, xite = s.ask("XT;")
 	}
 
-	alc, aerr := s.ask("RM4;")
-	pmtr, pmerr := s.ask("RM5;")
-	swr, swerr := s.ask("RM6;")
+	var alc, pmtr, swr string
+	var aerr, pmerr, swerr error
+	// ⚠️ The transmit meters are only worth reading while keyed, and they are
+	// three more exchanges in front of the operator's next command.
+	if !yield() {
+		alc, aerr = s.ask("RM4;")
+		pmtr, pmerr = s.ask("RM5;")
+		swr, swerr = s.ask("RM6;")
+	} else {
+		aerr, pmerr, swerr = errYielded, errYielded, errYielded
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -309,6 +357,9 @@ func (s *Serial) Describe() string { return "serial " + s.name }
 // the radio acts on the wreckage - which on a transmitter is not a display glitch.
 
 func (s *Serial) send(cmd string) error {
+	// The poller yields to this - see pollOnce.
+	s.waiting.Add(1)
+	defer s.waiting.Add(-1)
 	// ⚠️ THE SAME LOCK AS ask(), not the snapshot lock. A write taken out while
 	// another exchange is mid-read injects bytes into the middle of somebody
 	// else's reply - the same crossed-answers fault, arriving from the other
@@ -351,7 +402,15 @@ func (s *Serial) Send(cmd string) error {
 
 // Ask sends a query and returns the radio's reply, for routes that must read
 // before they write (cycling AGC, toggling the antenna).
-func (s *Serial) Ask(cmd string) (string, error) { return s.ask(cmd) }
+//
+// ⚠️ THIS IS AN OPERATOR'S READ, not the poller's, so it takes priority the same
+// way a write does: a toggle that has to read before it writes would otherwise
+// wait out the poll cycle twice.
+func (s *Serial) Ask(cmd string) (string, error) {
+	s.waiting.Add(1)
+	defer s.waiting.Add(-1)
+	return s.ask(cmd)
+}
 
 // SetFreq moves VFO A. ⚠️ Range-checked and REFUSED rather than clamped: a radio
 // that silently lands somewhere other than where you asked is worse than one

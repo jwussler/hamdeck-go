@@ -396,7 +396,6 @@ func silk(th *material.Theme, s string) layout.Widget {
 	}
 }
 
-
 // The connect screen. ⚠️ No default host: the panel is served BY the station, so
 // it already knows where it is (origin_js.go) - and a hostname compiled into a
 // published client would point every install at one person's radio.

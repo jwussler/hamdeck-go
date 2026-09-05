@@ -4,7 +4,7 @@ import 'package:hamdeck_panel/main.dart';
 /// What an operator types, and what it has to become.
 ///
 /// ⚠️ THE ADDRESS OF A STATION IS A NAME. Typing a bare name has to reach the
-/// station, and the panel used to answer "no reply from http://<name>"
+/// station, and the panel used to answer "no reply from `http://<name>`"
 /// - it defaulted to http, so the request went to port 80, and a working station
 /// read as a dead one. A scheme and a port in the box are not the operator's job.
 ///

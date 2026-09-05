@@ -434,13 +434,17 @@ func (s *Server) Handler() http.Handler {
 					return
 				}
 			}
+			started := time.Now()
 			if err := fn(arg); err != nil {
 				// ⚠️ The radio's objection, passed through verbatim. A generic
 				// "failed" sends the operator hunting in the wrong place.
 				writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 				return
 			}
-			writeJSON(w, 200, map[string]any{"status": "ok", "rig": s.Rig.Snapshot()})
+			// ⚠️ How long the RADIO took, not the network. PTT is the one where
+			// the operator notices, and it was waiting out a poll cycle.
+			writeJSON(w, 200, map[string]any{"status": "ok",
+				"ms": time.Since(started).Milliseconds(), "rig": s.Rig.Snapshot()})
 		})
 	}
 	// ⚠️ /api/mode/ is owned by the CAT table in rigroutes.go - it validates the

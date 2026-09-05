@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The CAT table, ported from the C++ host route by route.
@@ -641,6 +642,10 @@ func (s *Server) catHandler(prefix string, build catBuilder) http.HandlerFunc {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
+		// ⚠️ TIMED, BECAUSE "IT FEELS LAGGY" IS NOT A MEASUREMENT. This is the
+		// wait for the serial line plus the write itself, and it is the number
+		// that moved when the poll loop was taught to yield to the operator.
+		started := time.Now()
 		for i, c := range cmds {
 			if err := rig.Send(c); err != nil {
 				// ⚠️ Name WHICH command failed and how far the sequence got.
@@ -653,7 +658,8 @@ func (s *Server) catHandler(prefix string, build catBuilder) http.HandlerFunc {
 				return
 			}
 		}
-		out := map[string]any{"status": "ok", "sent": cmds}
+		out := map[string]any{"status": "ok", "sent": cmds,
+			"ms": time.Since(started).Milliseconds()}
 		for k, v := range extra {
 			out[k] = v
 		}
