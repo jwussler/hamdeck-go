@@ -144,7 +144,7 @@ None of these were the application. Each one sent me into the app first.
 ⚠️ Also: **OCR reads this UI's digits badly** (`F1i4` for F14), so rows are matched
 on wording that is unique - "footswitch" is only on the F13 row - not on numbers.
 
-### ✅ The Windows drive passes end to end (09/05/2026)
+### ✅ GREEN, ZERO FAILURES (09/05/2026) - tools/win_drive.sh
 On a box rolled back to the `clean` baseline, from the installer:
 
 | step | result |
@@ -157,6 +157,9 @@ On a box rolled back to the `clean` baseline, from the installer:
 | **the key works with the panel in the BACKGROUND** | ok, 2 ptt calls |
 
 The panel reads `system-wide, hold — release detected by key-state polling · 1 presses`.
+
+⚠️ The `panel says:` line at the end is a PRINT, not an assertion, and it garbles
+("prt", "vest"). Ignore it - the host-side ptt counts are the gate.
 
 ⚠️ The last failure to go was **my own redundant check**: an OCR of the PTT status
 line that reported "the panel still has not seen a press" on a run where the host
