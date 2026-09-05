@@ -40,6 +40,32 @@ class Api {
 
   Future<Map<String, dynamic>?> send(String path) async => _get(path);
 
+  /// A route that takes a JSON body. The admin surface needs it: adding an
+  /// account and resetting a password both carry a password, and a password
+  /// must never travel in a URL where it lands in logs and history.
+  ///
+  /// ⚠️ Returns the host's OWN message on failure rather than null. An admin
+  /// screen that says "that did not work" without saying why is the reason the
+  /// operator ends up in a terminal.
+  Future<({bool ok, String? message, Map<String, dynamic>? body})> post(
+      String path, Map<String, dynamic> body) async {
+    if (_token == null) return (ok: false, message: 'not logged in', body: null);
+    try {
+      final r = await http
+          .post(Uri.parse('$base$path?token=$_token'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(body))
+          .timeout(const Duration(seconds: 8));
+      final decoded = jsonDecode(r.body) as Map<String, dynamic>;
+      if (r.statusCode != 200) {
+        return (ok: false, message: decoded['message'] as String? ?? 'failed', body: decoded);
+      }
+      return (ok: true, message: decoded['message'] as String?, body: decoded);
+    } catch (e) {
+      return (ok: false, message: 'no reply from $base', body: null);
+    }
+  }
+
   Future<Map<String, dynamic>?> _get(String path) async {
     if (_token == null) return null;
     try {

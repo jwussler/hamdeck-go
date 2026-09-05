@@ -112,7 +112,7 @@ $SSH 'powershell -NoProfile -Command "
     if (-not ($sys -or $app)) { $bad += $d }
   }
   if ($bad.Count) { Write-Output (\"missing: \" + ($bad -join \", \")); exit 1 } else { exit 0 }"' \
-    && ok "the C++ runtime is available to the app" \
+    && ok "the MSVC runtime is available to the app" \
     || fail "the app cannot start on a clean machine - no Visual C++ runtime"
 
 echo "== is it actually on disk where the operator will look for it"

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'admin.dart';
 import 'api.dart';
 import 'audio/audio.dart';
 import 'keymap.dart';
@@ -15,6 +16,10 @@ import 'readout.dart';
 import 'settings.dart';
 import 'station_tray.dart';
 import 'theme.dart';
+
+/// Build the operating surface into a web bundle, FOR SCREENSHOTS ONLY.
+/// Never set for a build that gets served. See main().
+const bool _shootOperating = bool.fromEnvironment('HAMDECK_SHOOT');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,6 +32,30 @@ Future<void> main() async {
     // ⚠️ The window must ASK before it closes: closing may only hide, and if it
     // is really quitting it has to release the transmitter first.
     await windowManager.setPreventClose(true);
+  }
+  // ⚠️ THE BROWSER GETS THE ADMIN PAGE, AND NOTHING ELSE.
+  //
+  // A browser is the wrong place to key a transmitter: the audio path is not the
+  // native one, a background tab is throttled by the browser at times of its own
+  // choosing, and the key that unkeys you may be swallowed by the page. So the
+  // web build is not a cut-down panel, it is a different product - who is signed
+  // in, throw them off, lock the station down, KILL TRANSMIT, and read-only
+  // status. Everything else operates from the native panel.
+  //
+  // ⚠️ The host is the origin that served the page, never typed. An admin page
+  // that asks which station to administer can be pointed at the wrong one.
+  // ⚠️ ONE EXCEPTION, AND IT IS NEVER SERVED. tools/shoot_panel.py photographs
+  // the operating surface by driving a web build under headless Chrome - that is
+  // the fast visual loop that catches geometry faults before a binary exists,
+  // and losing it would mean going back to recording the screen and uploading a
+  // video. `bool.fromEnvironment` is a CONST, so with the default false the
+  // whole operating surface is const-folded away and tree-shaken out of the
+  // released web bundle; the only build that contains it is the one the
+  // screenshot tool makes with --dart-define. tools/check_web_is_admin_only.py
+  // proves that about the actual shipped main.dart.js rather than trusting it.
+  if (kIsWeb && !_shootOperating) {
+    runApp(AdminApp(base: Uri.base.origin));
+    return;
   }
   runApp(const HamDeckApp());
 }

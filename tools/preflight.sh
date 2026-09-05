@@ -54,6 +54,8 @@ check "flutter test" bash -c 'cd client && flutter test'
 # not exist there, so an unconditional import fails HERE rather than silently
 # shipping a panel the browser cannot load.
 check "the web panel compiles" bash -c 'cd client && flutter build web --release'
+# ⚠️ AFTER the build, because it inspects the artifact, not the source.
+check "the browser gets admin only, no operating" python3 tools/check_web_is_admin_only.py
 check "the linux panel compiles" bash -c 'cd client && flutter build linux --release'
 
 if [ "$QUICK" != "quick" ]; then

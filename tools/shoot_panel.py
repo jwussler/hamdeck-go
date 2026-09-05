@@ -23,7 +23,9 @@ width, so the width is a thing under test.
 
     tools/shoot_panel.py [outdir]
 
-Needs: a built web panel (client/build/web), google-chrome, python websocket-client.
+Needs: google-chrome and python websocket-client. It builds its own web bundle
+with --dart-define=HAMDECK_SHOOT=true; the shipped web build is the admin page
+and has no operating surface to photograph.
 """
 import base64
 import json
@@ -39,7 +41,11 @@ import urllib.request
 import websocket
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PANEL = os.path.join(ROOT, "client", "build", "web")
+# ⚠️ NOT client/build/web. That is the SHIPPED bundle, and the shipped bundle is
+# the admin page - a browser has no operating surface on purpose. This tool needs
+# a build made with --dart-define=HAMDECK_SHOOT=true, which is never served, and
+# it builds it itself so the two cannot drift.
+PANEL = os.path.join(ROOT, "client", "build", "web-shoot")
 HOST = os.path.join(ROOT, "hamdeck-host")
 PORT, CTRL, CDP = 5911, 5910, 9311
 USER, PASSWORD = "shoot", "shoot-only"
@@ -164,8 +170,13 @@ class Browser:
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "shots")
     os.makedirs(out, exist_ok=True)
-    if not os.path.isdir(PANEL):
-        raise SystemExit(f"no built panel at {PANEL} - run: cd client && flutter build web --release")
+    if not os.path.isdir(PANEL) or "--rebuild" in sys.argv:
+        print("building the operating surface for screenshots (never served) ...")
+        subprocess.run(
+            ["flutter", "build", "web", "--release",
+             "--dart-define=HAMDECK_SHOOT=true", "-o", PANEL],
+            cwd=os.path.join(ROOT, "client"), check=True,
+            stdout=subprocess.DEVNULL)
     if not os.path.isfile(HOST):
         raise SystemExit(f"no host binary at {HOST} - run: go build ./cmd/hamdeck-host")
 
