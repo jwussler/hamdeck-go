@@ -7,10 +7,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-EnvironmentFile=/etc/hamdeck-go/env
 ExecStart=/opt/hamdeck-go/bin/hamdeck-host     --radio /dev/ttyRIG --radio-baud 38400     --audio codec     --tgxl 192.168.40.51 --tgxl-port 9010     --record-dir /var/lib/hamdeck-go/recordings --replay-seconds 60     --cat-proxy-port 4532     --panel /opt/hamdeck-go/panel     --port 5102 --control-port 5101
 Restart=on-failure
 RestartSec=3
+# ⚠️ NO EnvironmentFile. The credential used to arrive as HAMDECK_ADMIN_HASH and
+# was attached to a username written into main.go; accounts now live in
+# /etc/hamdeck-go/users.json and are created and reset with
+# `hamdeck-host users set <name>`, which the running host picks up without a
+# restart. One mechanism, and one that can be used from a terminal by somebody
+# who is locked out.
+#
 # ⚠️ THIS FILE IS THE ONE THE STATION RUNS - it is copied to
 # /etc/systemd/system/hamdeck-go.service, not retyped there. The two had already
 # drifted: the box carried --cat-proxy-port 4532 and this did not, so a

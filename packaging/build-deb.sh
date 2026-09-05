@@ -43,16 +43,21 @@ cp "$ROOT/packaging/hamdeck-go.service" "$STAGE/lib/systemd/system/hamdeck-go.se
 cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
-# ⚠️ ENABLED BUT NOT STARTED. There is no credential yet and no radio named, so
+# ⚠️ ENABLED BUT NOT STARTED. There is no account yet and no radio named, so
 # starting here would produce a service that fails on first boot and an operator
-# who thinks the package is broken. The message says what to do next.
+# who thinks the package is broken. The message says what to do next - and it is
+# the SAME command used to recover a forgotten password later, which is the point
+# of there being only one.
 systemctl daemon-reload || true
-if [ ! -f /etc/hamdeck-go/env ]; then
-    mkdir -p /etc/hamdeck-go
-    echo "HamDeck: set an admin password with:"
-    echo "  echo -n 'yourpassword' | /opt/hamdeck-go/bin/hamdeck-host --hash-password | sudo tee /etc/hamdeck-go/env"
-    echo "  sudo chmod 600 /etc/hamdeck-go/env"
-    echo "then edit /lib/systemd/system/hamdeck-go.service for your radio and run:"
+mkdir -p /etc/hamdeck-go
+if [ ! -f /etc/hamdeck-go/users.json ]; then
+    echo "HamDeck: create the first account with:"
+    echo "  sudo /opt/hamdeck-go/bin/hamdeck-host users set <username>"
+    echo "It is prompted for a password, becomes the administrator, and may transmit."
+    echo "The same command resets a forgotten password later - the running host"
+    echo "picks it up within seconds, with no restart."
+    echo
+    echo "Then name your radio in /lib/systemd/system/hamdeck-go.service and run:"
     echo "  sudo systemctl enable --now hamdeck-go"
 fi
 EOF

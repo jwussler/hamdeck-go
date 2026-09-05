@@ -34,12 +34,33 @@ import (
 // anybody asks for when something is wrong.
 var version = "0.0.0-untagged"
 
+const defaultUsersPath = "/etc/hamdeck-go/users.json"
+
 func main() {
+	// ⚠️ THE ACCOUNT COMMANDS COME FIRST, before flag parsing, because
+	// `hamdeck-host users set wa0o` is a verb and a name, not flags - and this is
+	// the path somebody takes when they are locked out and in a hurry. See
+	// users.go. --users may precede it to point at another store.
+	if len(os.Args) > 1 {
+		args := os.Args[1:]
+		path := defaultUsersPath
+		if args[0] == "--users" || args[0] == "-users" {
+			if len(args) < 2 {
+				fmt.Fprintln(os.Stderr, "--users needs a path")
+				os.Exit(2)
+			}
+			path, args = args[1], args[2:]
+		}
+		if len(args) > 0 && args[0] == "users" {
+			os.Exit(usersCommand(auth.NewStore(path), args[1:]))
+		}
+	}
+
 	control := flag.Int("control-port", 5101, "loopback control listener, no session")
 	dash := flag.Int("port", 5102, "dashboard listener, session required")
 	panel := flag.String("panel", "", "directory of a built panel to serve at /")
 	panel2 := flag.String("panel-alt", "", "a second panel, served at /alt/ - for comparing two clients side by side")
-	hashPw := flag.Bool("hash-password", false, "read a password on stdin and print its hash")
+	usersPath := flag.String("users", defaultUsersPath, "the accounts file. `hamdeck-host users set <name>` creates and resets accounts in it")
 	showVer := flag.Bool("version", false, "print the version and exit")
 	radioPort := flag.String("radio", "", "serial device of the radio, e.g. /dev/ttyRIG. Empty = simulated rig")
 	radioBaud := flag.Int("radio-baud", 38400, "serial speed")
@@ -61,20 +82,6 @@ func main() {
 		fmt.Printf("HamDeck API (Go) %s\n", version)
 		return
 	}
-	if *hashPw {
-		// ⚠️ stdin, never an argument - a password in argv is in the shell
-		// history and visible in ps to every user on the machine.
-		fmt.Fprint(os.Stderr, "New admin password: ")
-		var pw string
-		fmt.Scanln(&pw)
-		if strings.TrimSpace(pw) == "" {
-			fmt.Fprintln(os.Stderr, "no password given")
-			os.Exit(1)
-		}
-		fmt.Printf("HAMDECK_ADMIN_HASH=%s\n", auth.Hash(pw))
-		return
-	}
-
 	// ⚠️ THE RISKY PART, PROVEN BEFORE ANYTHING IS BUILT ON IT. Whether pure-Go
 	// ALSA can actually read this station's codec decides the whole audio design,
 	// and it is a ten minute answer rather than a discovery made after a
@@ -130,20 +137,48 @@ func main() {
 	} else {
 		r = rig.NewSim()
 	}
-	a := auth.New(480)
-	if h := os.Getenv("HAMDECK_ADMIN_HASH"); h != "" {
-		if err := a.AddUser("admin", h); err != nil {
-			log.Fatalf("FATAL: %v", err)
-		}
+	// ⚠️ ONE PLACE ACCOUNTS EXIST: the store. No username in this file, no hash
+	// in an environment variable. HAMDECK_ADMIN_HASH used to be read here and is
+	// deliberately gone - two mechanisms that had to agree, and the one written
+	// in Go could not be changed without a rebuild.
+	store := auth.NewStore(*usersPath)
+	a := auth.New(store, 480)
+	if err := a.Load(); err != nil {
+		// ⚠️ Refuse rather than start with no accounts. An unreadable file looks
+		// exactly like a fresh install, and somebody "fixes" that by creating a
+		// second administrator beside the accounts already on disk.
+		log.Fatalf("FATAL: %v", err)
 	}
+	for _, w := range store.Warnings() {
+		log.Printf("⚠️  %s", w)
+	}
+	// ⚠️ A RESET DONE FROM A TERMINAL MUST NOT NEED A RESTART. Restarting to
+	// apply a password drops CAT, the receiver and anything on the air, so an
+	// operator locked out mid-net would have to take the station down to get
+	// back in. The file is checked every few seconds instead.
+	go func() {
+		for range time.Tick(3 * time.Second) {
+			if changed, err := a.ReloadIfChanged(); err != nil {
+				log.Printf("accounts: %v", err)
+			} else if changed {
+				log.Printf("accounts: reloaded %s", store.Path())
+			}
+		}
+	}()
 
 	// ⚠️ It starts WITHOUT a user rather than inventing one, and says so. A
 	// shipped default credential is a credential everybody has.
 	log.Printf("HamDeck API (Go) %s", version)
 	log.Printf("rig: %s", r.Describe())
-	log.Printf("auth: %s", map[bool]string{
-		true: "configured", false: "NO USERS - the dashboard will refuse every login",
-	}[a.Configured()])
+	if a.Configured() {
+		log.Printf("accounts: %d in %s", len(a.Users()), store.Path())
+	} else {
+		// ⚠️ Never invent one. A shipped default credential is a credential
+		// everybody has - but a host that only says "no users" is a dead end, so
+		// it says the command that fixes it.
+		log.Printf("⚠️  NO ACCOUNTS in %s - every login will be refused.", store.Path())
+		log.Printf("    create one with:  hamdeck-host users set <username>")
+	}
 
 	// ⚠️ THE RECEIVER IS OPTIONAL AND ITS FAILURE IS LOUD. A host that starts
 	// with a silent audio path looks healthy and is useless to a remote

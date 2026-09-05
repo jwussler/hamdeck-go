@@ -90,7 +90,10 @@ func (s *Server) registerAdmin(mux routeMux) {
 	mux.HandleFunc("/api/admin/users", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
 		users := []map[string]any{}
 		for _, u := range s.Auth.Users() {
-			users = append(users, map[string]any{"username": u, "perms": s.Auth.PermsOf(u)})
+			// ⚠️ Users() already strips the hash. A list of accounts rendered in
+			// a browser must not carry the thing that protects them.
+			users = append(users, map[string]any{"username": u.Username,
+				"perms": s.Auth.PermsOf(u.Username)})
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "users": users})
 	}))
@@ -101,15 +104,24 @@ func (s *Server) registerAdmin(mux routeMux) {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
-		if err := s.Auth.AddUser(name, auth.Hash(pw)); err != nil {
+		if s.Auth.Exists(name) {
+			// ⚠️ "Add" must not silently reset an existing account's password.
+			// There is a route for that, and conflating them means a typo in a
+			// username changes somebody else's credential.
+			writeJSON(w, 400, map[string]string{"status": "error",
+				"message": "there is already an account called " + name})
+			return
+		}
+		if err := s.Auth.SetPassword(name, pw, true); err != nil {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
+		// ⚠️ It survives a restart now - accounts live in the store, not in this
+		// process - and it starts with NO permissions, which has to be said or
+		// the operator finds out when the person cannot key up.
 		writeJSON(w, 200, map[string]any{"status": "ok", "user": name,
-			// ⚠️ Say it out loud: this host keeps users in memory, so an account
-			// added here is gone at the next restart. Better a plain warning than
-			// an operator discovering it after a reboot.
-			"message": "added - this host keeps users in memory, so it will not survive a restart"})
+			"perms":   s.Auth.PermsOf(name),
+			"message": "added. It may listen but not transmit until granted /api/admin/user/tx/" + name + "/on"})
 	}))
 
 	mux.HandleFunc("/api/admin/user/password", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
@@ -118,7 +130,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
-		if err := s.Auth.SetPassword(name, auth.Hash(pw)); err != nil {
+		// ⚠️ create=false: this route resets a password, it does not invent an
+		// account. A typo here would otherwise become a login.
+		if err := s.Auth.SetPassword(name, pw, false); err != nil {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
@@ -134,7 +148,7 @@ func (s *Server) registerAdmin(mux routeMux) {
 				"message": "that is the account you are logged in as"})
 			return
 		}
-		if err := s.Auth.RemoveUser(name); err != nil {
+		if err := s.Auth.Remove(name); err != nil {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}

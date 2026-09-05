@@ -1,10 +1,20 @@
-// Package auth: sessions and the credential.
+// Package auth is accounts and sessions.
 //
-// ⚠️ SAME KDF AND THE SAME FORMAT AS THE C++ HOST - pbkdf2:<hex salt>:<hex hash>,
-// PBKDF2-HMAC-SHA256, 350000 iterations. Not for compatibility's sake: it means a
-// station can move between the two hosts without every operator re-enrolling, and
-// it means this experiment can be judged on the thing being tested rather than on
-// a login that behaves differently.
+// ⚠️ THE FILE IS THE ACCOUNTS. There is exactly one place an account exists -
+// the store, see store.go - and exactly one way to create or reset one:
+// `hamdeck-host users set <name>` on the machine. No username in code, no hash
+// in an environment variable, no second path that only works on a fresh install.
+//
+// This was rewritten rather than extended on 09/04/2026. What it replaced kept
+// users in one map, their permissions in another, took the only real credential
+// from HAMDECK_ADMIN_HASH, and attached it to a username spelled "admin" in
+// main.go - so there was no supported way to change the operator's own name, and
+// no way at all to reset a forgotten password from a terminal. Three mechanisms
+// that had to agree, and a recovery story that was "edit Go and rebuild".
+//
+// ⚠️ PBKDF2-HMAC-SHA256, 350000 iterations, format pbkdf2:<hex salt>:<hex hash>.
+// The same as the C++ host on purpose: a station moves between the two without
+// anybody re-enrolling.
 package auth
 
 import (
@@ -23,13 +33,11 @@ import (
 
 const iterations = 350000
 
-// Perms is what one account is allowed to do.
+// Perms is what one account may do.
 //
-// ⚠️ CAN-TRANSMIT IS THE ONE THAT MATTERS. The station config this is ported
-// from has a "listener" account with can_transmit false, and an account that can
-// listen to a radio is a very different thing from one that can key it. A
-// permission model where everyone who can log in can transmit is not a
-// permission model.
+// ⚠️ CAN-TRANSMIT IS THE ONE THAT MATTERS. An account that can listen to a
+// receiver is a very different thing from one that can key a transmitter, and a
+// model where everyone who can log in can transmit is not a permission model.
 type Perms struct {
 	CanTransmit bool `json:"can_transmit"`
 	IsAdmin     bool `json:"is_admin"`
@@ -38,10 +46,11 @@ type Perms struct {
 
 type Service struct {
 	mu       sync.RWMutex
-	users    map[string]string // username -> hash
-	perms    map[string]Perms
+	store    *Store
+	users    map[string]User
 	sessions map[string]session
 	ttl      time.Duration
+	loadedAt time.Time
 }
 
 type session struct {
@@ -49,17 +58,91 @@ type session struct {
 	expires time.Time
 }
 
-func New(ttlMinutes int) *Service {
+// New builds the service around a store. Nothing is read until Load.
+func New(store *Store, ttlMinutes int) *Service {
 	if ttlMinutes <= 0 {
 		ttlMinutes = 480
 	}
 	return &Service{
-		users:    map[string]string{},
-		perms:    map[string]Perms{},
+		store:    store,
+		users:    map[string]User{},
 		sessions: map[string]session{},
 		ttl:      time.Duration(ttlMinutes) * time.Minute,
 	}
 }
+
+// Load reads the accounts file. A missing file is not an error - it is a station
+// nobody has set up yet - but an unreadable or malformed one is.
+func (s *Service) Load() error {
+	users, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replaceLocked(users)
+	s.loadedAt = s.store.ModTime()
+	return nil
+}
+
+// ReloadIfChanged picks up a reset done from a terminal WITHOUT a restart.
+//
+// ⚠️ THIS IS WHY A LOCKOUT IS NOT AN OUTAGE. Restarting the host to apply a new
+// password drops CAT, the receiver and any transmission in progress; an operator
+// locked out mid-net would have to take the station down to get back in. The
+// file's modification time is enough - accounts change by hand, rarely, and a
+// stat every few seconds costs nothing.
+func (s *Service) ReloadIfChanged() (bool, error) {
+	mt := s.store.ModTime()
+	s.mu.RLock()
+	same := mt.Equal(s.loadedAt)
+	s.mu.RUnlock()
+	if same {
+		return false, nil
+	}
+	users, err := s.store.Load()
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replaceLocked(users)
+	s.loadedAt = mt
+	return true, nil
+}
+
+// replaceLocked swaps the account set and ends sessions that no longer stand.
+//
+// ⚠️ A CHANGED PASSWORD MUST END THE SESSIONS IT PROTECTED. Resetting a
+// credential because somebody should no longer have access, while their live
+// session keeps working for another eight hours, is not a reset. Same for a
+// deleted account.
+func (s *Service) replaceLocked(users []User) {
+	next := make(map[string]User, len(users))
+	for _, u := range users {
+		if u.Username == "" || !strings.HasPrefix(u.Hash, "pbkdf2:") {
+			continue // a user with no credential is not a user
+		}
+		next[u.Username] = u
+	}
+	for tok, sess := range s.sessions {
+		old, had := s.users[sess.user]
+		cur, still := next[sess.user]
+		if !still || (had && old.Hash != cur.Hash) {
+			delete(s.sessions, tok)
+		}
+	}
+	s.users = next
+}
+
+// Configured reports whether anybody can log in at all.
+func (s *Service) Configured() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.users) > 0
+}
+
+// ── The credential ──────────────────────────────────────────────────────────
 
 func Hash(password string) string {
 	salt := make([]byte, 16)
@@ -68,59 +151,33 @@ func Hash(password string) string {
 	return "pbkdf2:" + hex.EncodeToString(salt) + ":" + hex.EncodeToString(dk)
 }
 
-func (s *Service) AddUser(name, hash string) error {
-	// ⚠️ An empty hash is REFUSED, not stored. The C++ host shipped an example
-	// config with a blank placeholder hash and a fresh install sat in a restart
-	// loop; a user with no credential is not a user.
-	if name == "" || !strings.HasPrefix(hash, "pbkdf2:") {
-		return fmt.Errorf("user %q needs a pbkdf2: hash", name)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	first := len(s.users) == 0
-	s.users[name] = hash
-	if first {
-		// ⚠️ RECORDED, NOT INFERRED. This used to be worked out on the fly as
-		// "if there is exactly one user, they are the admin" - which quietly
-		// revoked the founder's own administrator rights the instant they added
-		// a second account, locking them out of the page they were standing on.
-		// A permission that exists only while some other condition holds is not
-		// a permission.
-		s.perms[name] = Perms{CanTransmit: true, IsAdmin: true}
-	}
-	return nil
-}
-
-func (s *Service) Configured() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.users) > 0
-}
-
-// Login returns a session token, or "" - and deliberately says nothing about
-// WHICH half was wrong. "No such user" tells an attacker which names exist.
-func (s *Service) Login(user, password string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	stored, ok := s.users[user]
-	if !ok {
-		return ""
-	}
+func verify(stored, password string) bool {
 	parts := strings.Split(stored, ":")
 	if len(parts) != 3 {
-		return ""
+		return false
 	}
 	salt, err := hex.DecodeString(parts[1])
 	if err != nil {
-		return ""
+		return false
 	}
 	want, err := hex.DecodeString(parts[2])
 	if err != nil {
-		return ""
+		return false
 	}
 	got := pbkdf2.Key([]byte(password), salt, iterations, 32, sha256.New)
 	// ⚠️ Constant time. A byte-by-byte compare leaks the hash through timing.
-	if subtle.ConstantTimeCompare(got, want) != 1 {
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// Login returns a session token, or "".
+//
+// ⚠️ It says nothing about WHICH half was wrong: "no such user" tells an
+// attacker which names exist on the station.
+func (s *Service) Login(user, password string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[user]
+	if !ok || !verify(u.Hash, password) {
 		return ""
 	}
 	raw := make([]byte, 24)
@@ -130,38 +187,32 @@ func (s *Service) Login(user, password string) string {
 	return tok
 }
 
-func (s *Service) Valid(token string) bool {
+// ── Sessions ────────────────────────────────────────────────────────────────
+
+func (s *Service) Valid(token string) bool { return s.Who(token) != "" }
+
+func (s *Service) Who(token string) string {
+	if token == "" {
+		return ""
+	}
 	s.mu.RLock()
 	sess, ok := s.sessions[token]
 	s.mu.RUnlock()
 	if !ok {
-		return false
+		return ""
 	}
 	if time.Now().After(sess.expires) {
 		s.mu.Lock()
 		delete(s.sessions, token)
 		s.mu.Unlock()
-		return false
-	}
-	return true
-}
-
-// ── Session and user management ─────────────────────────────────────────────
-
-// Who returns the username behind a token, or "" if it is not a live session.
-func (s *Service) Who(token string) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sess, ok := s.sessions[token]
-	if !ok || time.Now().After(sess.expires) {
 		return ""
 	}
 	return sess.user
 }
 
-// Logout ends one session. ⚠️ It reports whether a session was actually ended:
-// "ok" for a token that was already gone tells an operator their session was
-// closed when nothing happened.
+// Logout reports whether a session was really ended. ⚠️ Answering "ok" for a
+// token that was already gone tells an operator they logged out of something
+// when nothing happened.
 func (s *Service) Logout(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,10 +223,9 @@ func (s *Service) Logout(token string) bool {
 
 // SessionInfo is one live session, for the admin page.
 //
-// ⚠️ NO TOKENS. A list of live sessions that carries the tokens is a list of
-// working credentials, and it would be rendered in a browser and copied into
-// support conversations. The id is a short prefix, enough to tell two sessions
-// apart and useless for logging in.
+// ⚠️ NO TOKENS. A list of live sessions carrying their tokens is a list of
+// working credentials, rendered in a browser and pasted into support threads.
+// The id is a short prefix: enough to tell two apart, useless to log in with.
 type SessionInfo struct {
 	ID      string `json:"id"`
 	User    string `json:"user"`
@@ -193,8 +243,7 @@ func (s *Service) Sessions() []SessionInfo {
 			continue
 		}
 		out = append(out, SessionInfo{
-			ID:      tok[:8],
-			User:    sess.user,
+			ID: tok[:8], User: sess.user,
 			Expires: sess.expires.Format("01/02/2006 15:04"),
 			Minutes: int(sess.expires.Sub(now).Minutes()),
 		})
@@ -203,7 +252,7 @@ func (s *Service) Sessions() []SessionInfo {
 	return out
 }
 
-// Kick ends every session whose id prefix matches. Returns how many went.
+// Kick ends every session whose id starts with the given prefix.
 func (s *Service) Kick(idPrefix string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,46 +266,89 @@ func (s *Service) Kick(idPrefix string) int {
 	return n
 }
 
-func (s *Service) Users() []string {
+// ── Accounts. Every one of these writes the file. ───────────────────────────
+
+// Users is the account list, without hashes.
+func (s *Service) Users() []User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]string, 0, len(s.users))
-	for u := range s.users {
+	out := make([]User, 0, len(s.users))
+	for _, u := range s.users {
+		u.Hash = "" // ⚠️ never hand a hash to a caller that is going to render it
 		out = append(out, u)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
 	return out
 }
 
-// SetPassword changes an existing user's password.
-//
-// ⚠️ IT REFUSES TO CREATE ONE. "Change the password" quietly adding an account
-// that was never meant to exist is how a typo becomes a login.
-func (s *Service) SetPassword(name, hash string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.users[name]; !ok {
-		return fmt.Errorf("there is no user called %q", name)
-	}
-	s.users[name] = hash
-	return nil
+func (s *Service) Exists(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.users[name]
+	return ok
 }
 
-// RemoveUser deletes a user and ends their sessions.
+// SetPassword sets or resets one account's password, creating it if asked.
+//
+// ⚠️ CREATING IS A SEPARATE DECISION, PASSED IN. "Change the password" quietly
+// creating an account that was never meant to exist is how a typo becomes a
+// login; but the terminal reset path legitimately needs to create the first one,
+// so the caller says which it means rather than the rule being guessed here.
+//
+// ⚠️ THE FIRST ACCOUNT ON A STATION IS ITS ADMINISTRATOR, and that is RECORDED,
+// not inferred. Working it out on the fly as "if there is exactly one user they
+// are the admin" quietly revoked the founder's own rights the moment they added
+// a second account, locking them out of the page they were standing on.
+func (s *Service) SetPassword(name, password string, create bool) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("a username is required")
+	}
+	if password == "" {
+		// ⚠️ Refused, never hashed. A blank credential that hashes fine is an
+		// account anybody can log into.
+		return fmt.Errorf("an empty password is not a password")
+	}
+	s.mu.Lock()
+	u, exists := s.users[name]
+	if !exists {
+		if !create {
+			return unlockErr(&s.mu, fmt.Errorf("there is no account called %q", name))
+		}
+		u = User{Username: name}
+		if len(s.users) == 0 {
+			u.CanTransmit, u.IsAdmin = true, true
+		}
+	}
+	u.Hash = Hash(password)
+	s.users[name] = u
+	// ⚠️ A password change ends that account's sessions. Otherwise a reset made
+	// because somebody should no longer be on the station leaves them on it.
+	for tok, sess := range s.sessions {
+		if sess.user == name {
+			delete(s.sessions, tok)
+		}
+	}
+	users := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.persist(users)
+}
+
+// Remove deletes an account and ends its sessions.
 //
 // ⚠️ BOTH HALVES, ALWAYS. Removing the account and leaving the session alive
-// means a revoked user keeps working until their token expires - which is up to
-// eight hours of access that somebody believes they took away.
-func (s *Service) RemoveUser(name string) error {
+// means a revoked user keeps working until their token expires - up to eight
+// hours of access somebody believes they took away.
+func (s *Service) Remove(name string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.users[name]; !ok {
-		return fmt.Errorf("there is no user called %q", name)
+		return unlockErr(&s.mu, fmt.Errorf("there is no account called %q", name))
 	}
 	if len(s.users) == 1 {
-		// ⚠️ Never remove the last one. A host with no users cannot be logged
-		// into and cannot be fixed from the panel.
-		return fmt.Errorf("%q is the only user - removing it would lock everyone out", name)
+		// ⚠️ Never the last one. A station with no accounts cannot be logged
+		// into, and the panel cannot be used to fix it.
+		return unlockErr(&s.mu, fmt.Errorf(
+			"%q is the only account - removing it would lock everyone out", name))
 	}
 	delete(s.users, name)
 	for tok, sess := range s.sessions {
@@ -264,38 +356,77 @@ func (s *Service) RemoveUser(name string) error {
 			delete(s.sessions, tok)
 		}
 	}
-	return nil
+	users := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.persist(users)
 }
 
 // SetPerms records what an account may do.
 func (s *Service) SetPerms(name string, p Perms) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.users[name]; !ok {
-		return fmt.Errorf("there is no user called %q", name)
+	u, ok := s.users[name]
+	if !ok {
+		return unlockErr(&s.mu, fmt.Errorf("there is no account called %q", name))
 	}
-	s.perms[name] = p
-	return nil
+	if u.IsAdmin && !p.IsAdmin && s.lastAdminLocked(name) {
+		// ⚠️ The last administrator cannot be demoted. A station whose only
+		// admin has been demoted needs a terminal to fix, and the person doing
+		// the demoting is usually the person who then cannot undo it.
+		return unlockErr(&s.mu, fmt.Errorf(
+			"%q is the only administrator - promote somebody else first", name))
+	}
+	u.CanTransmit, u.IsAdmin, u.IsStation = p.CanTransmit, p.IsAdmin, p.IsStation
+	s.users[name] = u
+	users := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.persist(users)
 }
 
-// PermsOf answers for a username. ⚠️ An unknown user gets NOTHING, not
+func (s *Service) lastAdminLocked(name string) bool {
+	for n, u := range s.users {
+		if n != name && u.IsAdmin {
+			return false
+		}
+	}
+	return true
+}
+
+// PermsOf answers for a username. ⚠️ An unknown account gets NOTHING, not
 // everything: a permission lookup that fails open is worse than no permissions.
 func (s *Service) PermsOf(name string) Perms {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if name == "" {
+	u, ok := s.users[name]
+	if !ok {
 		return Perms{}
 	}
-	// Every account added after the first starts with nothing and has to be
-	// granted what it needs.
-	return s.perms[name]
+	return Perms{CanTransmit: u.CanTransmit, IsAdmin: u.IsAdmin, IsStation: u.IsStation}
 }
 
-// CanTransmit is the question every keying route asks.
-func (s *Service) CanTransmit(token string) bool {
-	return s.PermsOf(s.Who(token)).CanTransmit
+func (s *Service) CanTransmit(token string) bool { return s.PermsOf(s.Who(token)).CanTransmit }
+func (s *Service) IsAdmin(token string) bool     { return s.PermsOf(s.Who(token)).IsAdmin }
+
+func (s *Service) snapshotLocked() []User {
+	out := make([]User, 0, len(s.users))
+	for _, u := range s.users {
+		out = append(out, u)
+	}
+	return out
 }
 
-func (s *Service) IsAdmin(token string) bool {
-	return s.PermsOf(s.Who(token)).IsAdmin
+// persist writes the file and remembers when, so the reload check does not
+// immediately re-read what this process just wrote.
+func (s *Service) persist(users []User) error {
+	if err := s.store.Save(users); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.loadedAt = s.store.ModTime()
+	s.mu.Unlock()
+	return nil
+}
+
+func unlockErr(mu *sync.RWMutex, err error) error {
+	mu.Unlock()
+	return err
 }

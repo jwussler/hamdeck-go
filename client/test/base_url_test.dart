@@ -3,8 +3,8 @@ import 'package:hamdeck_panel/main.dart';
 
 /// What an operator types, and what it has to become.
 ///
-/// ⚠️ THE ADDRESS OF A STATION IS A NAME. Typing `radio.wa0o.com` has to reach
-/// the station, and the panel used to answer "no reply from http://radio.wa0o.com"
+/// ⚠️ THE ADDRESS OF A STATION IS A NAME. Typing a bare name has to reach the
+/// station, and the panel used to answer "no reply from http://<name>"
 /// - it defaulted to http, so the request went to port 80, and a working station
 /// read as a dead one. A scheme and a port in the box are not the operator's job.
 ///
@@ -16,23 +16,23 @@ void main() {
   final desktop = Uri.parse('file:///opt/hamdeck-panel/hamdeck_panel');
 
   test('a bare name becomes https, with no port', () {
-    expect(_PanelStateTestHook.build('radio.wa0o.com', '', desktop),
-        'https://radio.wa0o.com');
+    expect(_PanelStateTestHook.build('station.example.com', '', desktop),
+        'https://station.example.com');
   });
 
   test('whitespace is not an address', () {
-    expect(_PanelStateTestHook.build('  radio.wa0o.com  ', '  ', desktop),
-        'https://radio.wa0o.com');
+    expect(_PanelStateTestHook.build('  station.example.com  ', '  ', desktop),
+        'https://station.example.com');
   });
 
   test('the port is a setting, and it is appended when set', () {
-    expect(_PanelStateTestHook.build('radio.wa0o.com', '5102', desktop),
-        'https://radio.wa0o.com:5102');
+    expect(_PanelStateTestHook.build('station.example.com', '5102', desktop),
+        'https://station.example.com:5102');
   });
 
   test('a port pasted into the address box is moved, not rejected', () {
-    expect(_PanelStateTestHook.build('radio.wa0o.com:5102', '', desktop),
-        'https://radio.wa0o.com:5102');
+    expect(_PanelStateTestHook.build('station.example.com:5102', '', desktop),
+        'https://station.example.com:5102');
   });
 
   test('an explicitly typed scheme wins - a bare IP host has no certificate', () {
@@ -41,8 +41,8 @@ void main() {
   });
 
   test('a pasted URL is accepted whole', () {
-    expect(_PanelStateTestHook.build('https://radio.wa0o.com/', '', desktop),
-        'https://radio.wa0o.com');
+    expect(_PanelStateTestHook.build('https://station.example.com/', '', desktop),
+        'https://station.example.com');
   });
 
   // ⚠️ A panel SERVED over http must talk http back to the host that sent it.
@@ -53,8 +53,8 @@ void main() {
   });
 
   test('a page served over https keeps https', () {
-    final page = Uri.parse('https://radio.wa0o.com/');
-    expect(_PanelStateTestHook.build('', '', page), 'https://radio.wa0o.com');
+    final page = Uri.parse('https://station.example.com/');
+    expect(_PanelStateTestHook.build('', '', page), 'https://station.example.com');
   });
 }
 

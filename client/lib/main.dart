@@ -120,7 +120,7 @@ class _PanelState extends State<Panel> {
     // compiled into a published client points every install at one station.
     final base = Uri.base;
     if (base.scheme == 'http' || base.scheme == 'https') {
-      // ⚠️ THE NAME, NOT THE ORIGIN. Filling this with "https://radio.wa0o.com"
+      // ⚠️ THE NAME, NOT THE ORIGIN. Filling this with "https://station.example.com"
       // teaches the operator that a scheme belongs in the box; it does not.
       // The port only appears when it is not the standard one - which is the
       // same rule the address bar uses.
@@ -135,7 +135,7 @@ class _PanelState extends State<Panel> {
   Future<void> _connect() async {
     if (_host.text.trim().isEmpty &&
         !(Uri.base.scheme == 'http' || Uri.base.scheme == 'https')) {
-      setState(() => _error = 'enter the station address, e.g. radio.wa0o.com');
+      setState(() => _error = 'enter your station address');
       return;
     }
     final base = buildStationBase(_host.text, _port.text, Uri.base);
@@ -248,7 +248,12 @@ class _PanelState extends State<Panel> {
             // ⚠️ A NAME, AND NOTHING ELSE. No scheme, no port: https is implied
             // and the port is under ADVANCED for the case where a host has no
             // name yet.
-            _field('STATION', _host, hint: 'radio.wa0o.com'),
+            //
+            // ⚠️ AND NO EXAMPLE THAT IS SOMEBODY'S REAL STATION. A placeholder
+            // naming one operator's host is a default host wearing a hat: it
+            // ships in a public client, it gets typed by people who have their
+            // own radio, and it points them at a station that is not theirs.
+            _field('STATION', _host, hint: 'hostname or IP address'),
             _field('USERNAME', _user),
             _field('PASSWORD', _pass, obscure: true, onSubmit: _connect),
             Align(
@@ -1251,7 +1256,7 @@ class _PanelState extends State<Panel> {
 
 /// Turn what the operator typed into a base URL.
 ///
-/// ⚠️ HTTPS IS IMPLIED. The address of a station is a NAME - `radio.wa0o.com` -
+/// ⚠️ HTTPS IS IMPLIED. The address of a station is a NAME - `station.example.com` -
 /// and that is the whole thing an operator should have to type. This used to
 /// demand a scheme and a port and hand back "no reply from ..." when either was
 /// missing, which reads as a dead station rather than a typo.

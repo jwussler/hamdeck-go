@@ -27,12 +27,28 @@ on the radio, so the gates below are run against the STATION.
 
 ```
 go build ./cmd/hamdeck-host
-./hamdeck-host --hash-password          # prompts, prints the env line
-HAMDECK_ADMIN_HASH=pbkdf2:... ./hamdeck-host --panel client/build/web
+./hamdeck-host users set <username>     # prompts twice; creates the first account
+./hamdeck-host --panel client/build/web
 ```
 
-⚠️ It starts with **no users** rather than a default login, and says so. A shipped credential
-is a credential everybody has.
+⚠️ It starts with **no accounts** rather than a default login, and says so — a shipped
+credential is a credential everybody has.
+
+**Accounts live in `/etc/hamdeck-go/users.json`, and that is the only place they live.** No
+username in the source, no hash in an environment variable. The same command creates the first
+account and resets a forgotten password later:
+
+```
+hamdeck-host users list
+hamdeck-host users set <name>           # create, or reset a password
+hamdeck-host users remove <name>
+hamdeck-host users grant <name> tx      # a new account may listen, not transmit
+```
+
+⚠️ **The password is prompted for and never taken as an argument** — an argument is in the
+shell history and visible in `ps` to everyone on the machine. ⚠️ **A reset reaches a running
+host within seconds**, so recovering a login does not mean restarting the station and dropping
+CAT, the receiver and anything on the air.
 
 ## Layout
 
