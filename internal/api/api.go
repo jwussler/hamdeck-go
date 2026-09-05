@@ -76,14 +76,70 @@ type Server struct {
 // as missing because it could not see one particular Go literal form - a
 // checklist that cries wolf stops being read, and this removes the guessing
 // entirely: the answer comes from the same registration the server actually uses.
+// ⚠️ THE ServeMux IS A NAMED FIELD, NOT EMBEDDED, AND THAT IS THE WHOLE POINT.
+// Embedded, http.ServeMux.HandleFunc is PROMOTED - so deleting the wrapper below
+// did not remove `mux.HandleFunc(...)`, it silently redirected every one of them
+// to the raw mux: no policy, no path recorded, and it compiled cleanly. The
+// unguarded routes would have been found by check_auth.py and the missing paths
+// by parity.py, but only after the fact. Named, the compiler refuses instead.
 type routeMux struct {
-	*http.ServeMux
+	mux   *http.ServeMux
 	paths *[]string
+	s     *Server
 }
 
-func (m routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+// access says WHO MAY CALL A ROUTE, and every registration states one.
+//
+// ⚠️ THIS REPLACES THREE DIFFERENT WAYS OF ANSWERING THE SAME QUESTION. Thirteen
+// routes were wrapped in guard(), eighteen hand-rolled `if !s.authed(r)` inside
+// the handler body, and admin.go had a third wrapper that decided admin-ness by
+// URL PREFIX - so an admin route registered anywhere but /api/admin/ would
+// silently have got only a session check. Authorisation is the most
+// security-critical decision this host makes and there was no single place that
+// made it; it was correct only because tools/check_auth.py walks every route
+// afterwards and fails if one answers without a session.
+//
+// ⚠️ AND routeMux.HandleFunc IS GONE, deliberately. While it existed a route
+// could still be registered without saying who may call it, and "remember to
+// wrap it" is a rule rather than a gate. Now the only way in takes a policy, so
+// forgetting is not expressible.
+type access int
+
+const (
+	// session: any logged-in user.
+	session access = iota
+	// adminOnly: a logged-in user with the admin flag. By POLICY, not by the
+	// shape of the URL.
+	adminOnly
+	// open: deliberately reachable with no session. Every use is justified at
+	// its call site - there are only three, and each is a decision.
+	open
+)
+
+// route registers a handler behind a stated policy. This is the only way to
+// register anything.
+func (m routeMux) route(pattern string, who access, h http.HandlerFunc) {
 	*m.paths = append(*m.paths, pattern)
-	m.ServeMux.HandleFunc(pattern, h)
+	switch who {
+	case open:
+		m.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			cors(w, r)
+			h(w, r)
+		})
+	case adminOnly:
+		m.mux.HandleFunc(pattern, m.s.guardAdmin(h))
+	default:
+		m.mux.HandleFunc(pattern, m.s.guard(h))
+	}
+}
+
+// routeWho is route() for handlers that need to know WHICH account is calling -
+// the admin routes, which name the user in what they do and refuse to let one
+// remove itself.
+func (m routeMux) routeWho(pattern string, who access, h func(http.ResponseWriter, *http.Request, string)) {
+	m.route(pattern, who, func(w http.ResponseWriter, r *http.Request) {
+		h(w, r, m.s.Auth.Who(token(r)))
+	})
 }
 
 // mayTransmit answers the one question every keying path has to ask.
@@ -135,9 +191,37 @@ func cors(w http.ResponseWriter, r *http.Request) {
 // host up" without holding a credential, and /api/auth/login and its status.
 // Everything else is gated at the point of REGISTRATION rather than by a path
 // prefix - a prefix gate that stops matching after a rename fails OPEN.
+// guardAdmin is guard() plus the admin flag.
+//
+// ⚠️ IT DOES NOT LOOK AT THE URL. The wrapper this replaces checked
+// strings.HasPrefix(path, "/api/admin/"), which meant the policy lived in the
+// route's NAME - move an admin route and it quietly becomes a user route.
+func (s *Server) guardAdmin(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cors(w, r)
+		tok := token(r)
+		if s.Auth.Who(tok) == "" {
+			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
+			return
+		}
+		if !s.Auth.IsAdmin(tok) {
+			writeJSON(w, 403, map[string]string{"status": "error",
+				"message": "that needs an administrator account"})
+			return
+		}
+		fn(w, r)
+	}
+}
+
 func (s *Server) guard(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
+		// ⚠️ THIS CHECK IS THE WHOLE FUNCTION. A scripted removal of the
+		// now-redundant inline `if !s.authed(r)` blocks stripped it out of
+		// guard() too - the body matched the same pattern - and left a wrapper
+		// that set CORS headers and called the handler. 121 routes answered
+		// without a session and the host still built, vetted and served
+		// perfectly. tools/check_auth.py is what noticed.
 		if !s.authed(r) {
 			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
 			return
@@ -161,11 +245,13 @@ func (s *Server) authed(r *http.Request) bool {
 func (s *Server) Handler() http.Handler {
 	real := http.NewServeMux()
 	var registered []string
-	mux := routeMux{ServeMux: real, paths: &registered}
+	mux := routeMux{mux: real, paths: &registered, s: s}
 
 	// Health takes no session on purpose: it is how you ask "is the host up"
 	// without holding a credential, and it says nothing about the band.
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+	// ⚠️ open: it is how you ask "is the host up" without holding a credential,
+	// and it says nothing about the band.
+	mux.route("/api/health", open, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		writeJSON(w, 200, map[string]any{
 			"status": "ok", "service": "HamDeck API (Go)", "version": s.Version,
@@ -174,7 +260,10 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 
-	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+	// ⚠️ open, necessarily: this IS the door. A regex conversion made it require a
+	// session once, which is a bootstrap deadlock - you would need to be logged
+	// in to log in - and it fails CLOSED, so every client simply stops working.
+	mux.route("/api/auth/login", open, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		if r.Method == http.MethodOptions {
 			return
@@ -196,12 +285,8 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, map[string]string{"status": "ok", "token": tok})
 	})
 
-	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		writeJSON(w, 200, s.Rig.Snapshot())
 	})
 
@@ -215,12 +300,8 @@ func (s *Server) Handler() http.Handler {
 	// rebuilt. Where this host genuinely cannot do a thing yet, it answers
 	// honestly rather than 404ing: a client that gets "available: false" shows a
 	// disabled control, and one that gets a 404 shows an error.
-	mux.HandleFunc("/api/meters", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/meters", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		snap := s.Rig.Snapshot()
 		// ⚠️ EVERY FIELD HERE IS DERIVED, NONE IS A PLACEHOLDER. This route used
 		// to answer power:0, power_pct:0, swr_ratio:1.0, s_meter_db:0 and an
@@ -250,12 +331,8 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 
-	mux.HandleFunc("/api/meters/scale", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/meters/scale", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		// ⚠️ NO CALIBRATION IS SHIPPED, AND THAT IS SAID OUT LOUD. The C++ host
 		// carries hamlib's table and states in the payload that it was not
 		// measured on this station; inventing one here would put invented S-units
@@ -268,12 +345,8 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 
-	mux.HandleFunc("/api/status/full", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/status/full", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		snap := s.Rig.Snapshot()
 		// ⚠️ Only what this host actually reads. Every field here is polled from
 		// the radio or absent; none is a plausible default. A receiver toggle
@@ -284,12 +357,8 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 
-	mux.HandleFunc("/api/backend", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/backend", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		out := map[string]any{"status": "ok", "cat": s.Rig.Describe(), "simulated": false}
 		if s.Audio != nil {
 			out["rx_audio"] = s.Audio.Describe()
@@ -327,15 +396,11 @@ func (s *Server) Handler() http.Handler {
 		out["status"] = "ok"
 		writeJSON(w, 200, out)
 	}
-	mux.HandleFunc("/api/record/status", s.guard(recStatus))
+	mux.route("/api/record/status", session, recStatus)
 
 	recAct := func(action string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			cors(w, r)
-			if !s.authed(r) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
 			if s.Rec == nil {
 				writeJSON(w, 503, map[string]any{"status": "error", "available": false,
 					"message": "this host has no receive audio, so nothing to record"})
@@ -375,25 +440,21 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, 200, out)
 		}
 	}
-	mux.HandleFunc("/api/record/start", recAct("start"))
-	mux.HandleFunc("/api/record/stop", recAct("stop"))
-	mux.HandleFunc("/api/record/toggle", recAct("toggle"))
+	mux.route("/api/record/start", session, recAct("start"))
+	mux.route("/api/record/stop", session, recAct("stop"))
+	mux.route("/api/record/toggle", session, recAct("toggle"))
 	// ⚠️ The receive audio is MONO. The reference has a stereo variant for a
 	// two-receiver capture this host does not do, so it is the SAME call rather
 	// than a silent pretence at a second channel.
-	mux.HandleFunc("/api/record/toggle/stereo", recAct("toggle"))
-	mux.HandleFunc("/api/record/replay", recAct("replay"))
+	mux.route("/api/record/toggle/stereo", session, recAct("toggle"))
+	mux.route("/api/record/replay", session, recAct("replay"))
 
-	mux.HandleFunc("/api/remote-tx/on", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/remote-tx/on", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		// ⚠️ TWO DIFFERENT FAULTS, TWO DIFFERENT ANSWERS. Folding "no radio
 		// attached" into 401 "login required" sends the operator to check their
 		// password when the host simply has no rig - a confident wrong answer,
 		// which this project has already paid for once on a transmit route.
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		if ok, why := s.mayTransmit(r); !ok {
 			writeJSON(w, 403, map[string]any{"status": "error", "message": why})
 			return
@@ -418,12 +479,8 @@ func (s *Server) Handler() http.Handler {
 
 	// ── Control. Every one of these CHANGES THE RADIO. ──────────────────────
 	set := func(path string, fn func(string) error) {
-		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		mux.route(path, session, func(w http.ResponseWriter, r *http.Request) {
 			cors(w, r)
-			if !s.authed(r) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
 			arg := strings.TrimPrefix(r.URL.Path, path)
 			// ⚠️ The keying check happens HERE, where the request is, rather
 			// than inside the command builder - which has no request and would
@@ -477,7 +534,7 @@ func (s *Server) Handler() http.Handler {
 		on   bool
 	}{{"/api/mute/on", true}, {"/api/mute/off", false}} {
 		m := m
-		mux.HandleFunc(m.path, s.guard(func(w http.ResponseWriter, r *http.Request) {
+		mux.route(m.path, session, func(w http.ResponseWriter, r *http.Request) {
 			mr, ok := s.Rig.(interface{ SetMuted(bool) error })
 			if !ok {
 				writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
@@ -490,9 +547,9 @@ func (s *Server) Handler() http.Handler {
 			}
 			writeJSON(w, 200, map[string]any{"status": "ok", "muted": m.on,
 				"rig": s.Rig.Snapshot()})
-		}))
+		})
 	}
-	mux.HandleFunc("/api/mute/toggle", s.guard(func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/mute/toggle", session, func(w http.ResponseWriter, r *http.Request) {
 		mr, ok := s.Rig.(interface{ SetMuted(bool) error })
 		if !ok {
 			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
@@ -506,14 +563,14 @@ func (s *Server) Handler() http.Handler {
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "muted": want,
 			"rig": s.Rig.Snapshot()})
-	}))
+	})
 
 	// ── The antenna tuner ───────────────────────────────────────────────────
 	//
 	// ⚠️ TWO ROUTES, TWO BOXES. /api/tune is the rig's own ATU; this is the
 	// TG-XL. Each names itself in its reply so a confirmation can never say just
 	// "tuning" and leave the operator guessing which one is keying up.
-	mux.HandleFunc("/api/tune/tgxl/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/tune/tgxl/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		if s.Tuner == nil || !s.Tuner.Configured() {
 			writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
@@ -523,13 +580,9 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, map[string]any{"status": "ok", "tuner": "tgxl",
 			"available": true, "tuning": s.Tuner.Active(),
 			"device": s.Tuner.Describe(), "message": s.Tuner.Message()})
-	}))
-	mux.HandleFunc("/api/tune/tgxl", func(w http.ResponseWriter, r *http.Request) {
+	})
+	mux.route("/api/tune/tgxl", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		if s.Tuner == nil || !s.Tuner.Configured() {
 			writeJSON(w, 503, map[string]any{"status": "error", "tuner": "tgxl",
 				"available": false,
@@ -564,27 +617,19 @@ func (s *Server) Handler() http.Handler {
 	// /api/tune/tgxl and /api/tgxl/tune, and a client built against either one
 	// must work. An alias is cheaper than an operator finding out which spelling
 	// their client uses at the moment they want to tune.
-	mux.HandleFunc("/api/tgxl/tune", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/tgxl/tune", session, func(w http.ResponseWriter, r *http.Request) {
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/api/tune/tgxl"
 		real.ServeHTTP(w, r2)
 	})
 
 	// What the transmit audio path is and what it could be.
-	mux.HandleFunc("/api/tx-audio/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/tx-audio/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "tx": txStats(s.Tx)})
 	})
-	mux.HandleFunc("/api/tx-audio/devices", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/tx-audio/devices", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		// ⚠️ THE MICROPHONE IS ON THE CLIENT, NOT HERE. On the C++ host the
 		// transmit audio device is the machine's own sound card; on this one the
 		// operator's microphone lives in the panel, and the host's transmit
@@ -606,12 +651,8 @@ func (s *Server) Handler() http.Handler {
 	// checklist - changed shape depending on what was plugged in. A client
 	// cannot ask "does this host support remote transmit" if the answer is a
 	// 404 that also means "wrong URL".
-	mux.HandleFunc("/api/remote-tx/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/remote-tx/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		if s.Rig2 == nil {
 			writeJSON(w, 200, map[string]any{"status": "ok", "supported": false})
 			return
@@ -630,12 +671,8 @@ func (s *Server) Handler() http.Handler {
 			"hand_mic_live": !rear})
 	})
 
-	mux.HandleFunc("/api/remote-tx/off", func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/remote-tx/off", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		if s.Rig2 == nil {
 			writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
 				"message": "this host has no radio that can be routed for remote transmit"})
@@ -668,24 +705,21 @@ func (s *Server) Handler() http.Handler {
 	s.registerCAT(mux)
 
 	// What this host actually serves, from the registrations themselves.
-	mux.HandleFunc("/api/routes", s.guard(func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/routes", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		out := append([]string(nil), registered...)
 		sort.Strings(out)
 		writeJSON(w, 200, map[string]any{"status": "ok", "count": len(out), "routes": out})
-	}))
+	})
 
 	// ── The receiver ────────────────────────────────────────────────────────
 	if s.Audio != nil {
-		mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			if !s.authed(r) {
-				// ⚠️ 401 BEFORE THE UPGRADE. Anonymous receive audio means
-				// anyone who can reach this host can listen to the operator's
-				// receiver - the C++ host shipped exactly that once and it was
-				// a security fix, not a feature.
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
+		// ⚠️ session, AND THE POLICY RUNS BEFORE THE UPGRADE. Anonymous receive
+		// audio means anyone who can reach this host can listen to the
+		// operator's receiver - the C++ host shipped exactly that once and it
+		// was a security fix, not a feature. route() answers 401 without ever
+		// reaching the handler, so the socket is never accepted.
+		mux.route("/ws", session, func(w http.ResponseWriter, r *http.Request) {
 			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 				// Same origin as the panel this host serves; a browser sends the
 				// page's origin and nothing else is expected.
@@ -710,11 +744,7 @@ func (s *Server) Handler() http.Handler {
 		// that open carrier is then modulated by whatever the shack can hear,
 		// with nobody at the station. The C++ host has that scar; this does not
 		// need to earn it again.
-		mux.HandleFunc("/ws/tx", func(w http.ResponseWriter, r *http.Request) {
-			if !s.authed(r) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
+		mux.route("/ws/tx", session, func(w http.ResponseWriter, r *http.Request) {
 			if ok, why := s.mayTransmit(r); !ok {
 				writeJSON(w, 403, map[string]any{"status": "error", "message": why})
 				return
@@ -792,12 +822,8 @@ func (s *Server) Handler() http.Handler {
 		// because a remote client left the rig on REAR.
 
 		// What the audio path is actually doing, as numbers a person can read.
-		mux.HandleFunc("/api/audio", func(w http.ResponseWriter, r *http.Request) {
+		mux.route("/api/audio", session, func(w http.ResponseWriter, r *http.Request) {
 			cors(w, r)
-			if !s.authed(r) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
 			peak := s.Audio.Peak()
 			writeJSON(w, 200, map[string]any{
 				"status": "ok", "device": s.Audio.Describe(),
@@ -819,7 +845,7 @@ func (s *Server) Handler() http.Handler {
 		// rest, including deep links a browser reload asks for.
 		real.Handle("/", http.FileServer(http.Dir(s.PanelDir)))
 	}
-	return logging(mux)
+	return logging(real)
 }
 
 var errBadPTT = &ptterr{}

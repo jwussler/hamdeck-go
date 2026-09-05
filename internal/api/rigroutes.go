@@ -308,12 +308,8 @@ func (s *Server) registerCAT(mux routeMux) {
 	}
 	for _, g := range gets {
 		g := g
-		mux.HandleFunc(g.path, func(w http.ResponseWriter, req *http.Request) {
+		mux.route(g.path, session, func(w http.ResponseWriter, req *http.Request) {
 			cors(w, req)
-			if !s.authed(req) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
 			v, err := toggleState(r, g.query)
 			if err != nil {
 				// ⚠️ null, never a plausible number. A "get" that invents a
@@ -332,12 +328,8 @@ func (s *Server) registerCAT(mux routeMux) {
 		{"/api/freq-b", "FB;", "freq_b"},
 	} {
 		g := g
-		mux.HandleFunc(g.path, func(w http.ResponseWriter, req *http.Request) {
+		mux.route(g.path, session, func(w http.ResponseWriter, req *http.Request) {
 			cors(w, req)
-			if !s.authed(req) {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
 			hz, err := readFreq(r, g.query)
 			if err != nil {
 				writeJSON(w, 200, map[string]any{"status": "ok", g.field: nil,
@@ -359,10 +351,10 @@ func (s *Server) registerCAT(mux routeMux) {
 		{"/api/power/limit", "limit_watts", localPowerCap},
 	} {
 		p := p
-		mux.HandleFunc(p.path, s.guard(func(w http.ResponseWriter, req *http.Request) {
+		mux.route(p.path, session, func(w http.ResponseWriter, req *http.Request) {
 			cors(w, req)
 			writeJSON(w, 200, map[string]any{"status": "ok", p.field: p.val})
-		}))
+		})
 	}
 
 	// ── Nudges: read, step, write ────────────────────────────────────────────
@@ -433,12 +425,8 @@ func (s *Server) registerCAT(mux routeMux) {
 		}
 		return []string{fmt.Sprintf("KM%d;", n)}, map[string]any{"memory": n}, nil
 	})
-	mux.HandleFunc("/api/cw/status", func(w http.ResponseWriter, req *http.Request) {
+	mux.route("/api/cw/status", session, func(w http.ResponseWriter, req *http.Request) {
 		cors(w, req)
-		if !s.authed(req) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		speed, err := toggleState(r, "KS;")
 		out := map[string]any{"status": "ok", "keyer_buffer_chars": 24}
 		if err != nil {
@@ -477,11 +465,11 @@ func (s *Server) registerCAT(mux routeMux) {
 	}
 	for _, u := range unavailable {
 		u := u
-		mux.HandleFunc(u.path, s.guard(func(w http.ResponseWriter, req *http.Request) {
+		mux.route(u.path, session, func(w http.ResponseWriter, req *http.Request) {
 			cors(w, req)
 			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
 				"message": u.what})
-		}))
+		})
 	}
 
 	// VFO, split and lock.
@@ -613,20 +601,16 @@ func readFreq(r catRig, query string) (int64, error) {
 type catBuilder func(arg string) ([]string, map[string]any, error)
 
 func (s *Server) catRoute(mux routeMux, path string, build catBuilder) {
-	mux.HandleFunc(path, s.catHandler("", build))
+	mux.route(path, session, s.catHandler("", build))
 }
 
 func (s *Server) catPrefix(mux routeMux, prefix string, build catBuilder) {
-	mux.HandleFunc(prefix, s.catHandler(prefix, build))
+	mux.route(prefix, session, s.catHandler(prefix, build))
 }
 
 func (s *Server) catHandler(prefix string, build catBuilder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if !s.authed(r) {
-			writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-			return
-		}
 		rig, ok := s.Rig.(catRig)
 		if !ok {
 			writeJSON(w, 503, map[string]string{"status": "error",

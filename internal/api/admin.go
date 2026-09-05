@@ -44,29 +44,13 @@ func (s *Server) registerAdmin(mux routeMux) {
 	// one rather than in a wrapper somebody can forget to apply. The C++ host
 	// gates /api/admin/ by prefix; this does the same thing explicitly, because
 	// a prefix gate that stops matching after a rename fails OPEN.
-	admin := func(fn func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			cors(w, r)
-			tok := token(r)
-			who := s.Auth.Who(tok)
-			if who == "" {
-				writeJSON(w, 401, map[string]string{"status": "error", "message": "login required"})
-				return
-			}
-			// ⚠️ ADMIN ROUTES NEED THE ADMIN FLAG, not just a session. Every
-			// logged-in user could add accounts and lock down the station
-			// otherwise, which makes the read-only "listener" account a
-			// full administrator.
-			if strings.HasPrefix(r.URL.Path, "/api/admin/") && !s.Auth.IsAdmin(tok) {
-				writeJSON(w, 403, map[string]string{"status": "error",
-					"message": "that needs an administrator account"})
-				return
-			}
-			fn(w, r, who)
-		}
-	}
+	// ⚠️ The admin wrapper that used to live here is gone. It decided admin-ness
+	// with strings.HasPrefix(r.URL.Path, "/api/admin/"), which put the policy in
+	// the route's NAME - rename or move a route and its protection changed with
+	// it. Registration states the policy now: see access in api.go.
 
-	mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
+	// ⚠️ open: it says whether a session exists and nothing about the station.
+	mux.route("/api/auth/status", open, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		who := s.Auth.Who(token(r))
 		writeJSON(w, 200, map[string]any{"status": "ok",
@@ -74,7 +58,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 			"configured": s.Auth.Configured()})
 	})
 
-	mux.HandleFunc("/api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+	// ⚠️ open: it acts only on the caller's OWN token. Requiring a valid session
+	// to end a session is how a half-expired token becomes unloggable-out.
+	mux.route("/api/auth/logout", open, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		// ⚠️ Reports whether a session was really ended. Answering "ok" for a
 		// token that was already gone tells an operator they logged out of
@@ -83,11 +69,11 @@ func (s *Server) registerAdmin(mux routeMux) {
 		writeJSON(w, 200, map[string]any{"status": "ok", "ended": ended})
 	})
 
-	mux.HandleFunc("/api/admin/sessions", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	mux.routeWho("/api/admin/sessions", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		writeJSON(w, 200, map[string]any{"status": "ok", "sessions": s.Auth.Sessions()})
-	}))
+	})
 
-	mux.HandleFunc("/api/admin/users", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	mux.routeWho("/api/admin/users", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		users := []map[string]any{}
 		for _, u := range s.Auth.Users() {
 			// ⚠️ Users() already strips the hash. A list of accounts rendered in
@@ -96,9 +82,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 				"perms": s.Auth.PermsOf(u.Username)})
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "users": users})
-	}))
+	})
 
-	mux.HandleFunc("/api/admin/user/add", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	mux.routeWho("/api/admin/user/add", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		name, pw, err := userBody(r)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
@@ -122,9 +108,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 		writeJSON(w, 200, map[string]any{"status": "ok", "user": name,
 			"perms":   s.Auth.PermsOf(name),
 			"message": "added. It may listen but not transmit until granted /api/admin/user/tx/" + name + "/on"})
-	}))
+	})
 
-	mux.HandleFunc("/api/admin/user/password", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	mux.routeWho("/api/admin/user/password", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		name, pw, err := userBody(r)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
@@ -137,9 +123,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 			return
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "user": name})
-	}))
+	})
 
-	mux.HandleFunc("/api/admin/user/remove/", admin(func(w http.ResponseWriter, r *http.Request, who string) {
+	mux.routeWho("/api/admin/user/remove/", adminOnly, func(w http.ResponseWriter, r *http.Request, who string) {
 		name := strings.TrimPrefix(r.URL.Path, "/api/admin/user/remove/")
 		if name == who {
 			// ⚠️ Refuse to remove yourself. It is always a mistake, and the
@@ -154,9 +140,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "removed": name,
 			"message": "account removed and its sessions ended"})
-	}))
+	})
 
-	mux.HandleFunc("/api/admin/kick/", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	mux.routeWho("/api/admin/kick/", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/admin/kick/")
 		if len(id) < 4 {
 			// A short prefix would match half the sessions on the host.
@@ -166,7 +152,7 @@ func (s *Server) registerAdmin(mux routeMux) {
 		}
 		n := s.Auth.Kick(id)
 		writeJSON(w, 200, map[string]any{"status": "ok", "ended": n})
-	}))
+	})
 
 	// Per-account permissions, the three flags the station config carries.
 	for _, f := range []struct {
@@ -178,7 +164,7 @@ func (s *Server) registerAdmin(mux routeMux) {
 		{"/api/admin/user/station/", func(p *auth.Perms, v bool) { p.IsStation = v }},
 	} {
 		f := f
-		mux.HandleFunc(f.path, admin(func(w http.ResponseWriter, r *http.Request, who string) {
+		mux.routeWho(f.path, adminOnly, func(w http.ResponseWriter, r *http.Request, who string) {
 			// <name>/<on|off>
 			rest := strings.TrimPrefix(r.URL.Path, f.path)
 			name, val, ok := strings.Cut(rest, "/")
@@ -202,16 +188,16 @@ func (s *Server) registerAdmin(mux routeMux) {
 				return
 			}
 			writeJSON(w, 200, map[string]any{"status": "ok", "user": name, "perms": p})
-		}))
+		})
 	}
 
 	// ── Lockdown and the remote unkey ───────────────────────────────────────
-	mux.HandleFunc("/api/admin/lockdown/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/admin/lockdown/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		writeJSON(w, 200, map[string]any{"status": "ok",
 			"lockdown": s.Lock.On(), "reason": s.Lock.Reason()})
-	}))
-	mux.HandleFunc("/api/admin/lockdown/on", admin(func(w http.ResponseWriter, r *http.Request, who string) {
+	})
+	mux.routeWho("/api/admin/lockdown/on", adminOnly, func(w http.ResponseWriter, r *http.Request, who string) {
 		s.Lock.Set(true, "locked by "+who)
 		// ⚠️ Turning lockdown on UNKEYS. Locking a transmitter that is currently
 		// keyed and leaving it keyed is not a lockdown, it is a label.
@@ -220,16 +206,16 @@ func (s *Server) registerAdmin(mux routeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "lockdown": true,
 			"reason": s.Lock.Reason(), "unkeyed": s.Rig2 != nil})
-	}))
-	mux.HandleFunc("/api/admin/lockdown/off", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	})
+	mux.routeWho("/api/admin/lockdown/off", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		s.Lock.Set(false, "")
 		writeJSON(w, 200, map[string]any{"status": "ok", "lockdown": false})
-	}))
+	})
 
 	// ⚠️ THE PANIC BUTTON. It does not ask the client that is transmitting to
 	// stop - it drops PTT at the radio. A stuck client, a crashed one and a
 	// forgotten one all look the same from here, and all three are fixed by this.
-	mux.HandleFunc("/api/admin/unkey", admin(func(w http.ResponseWriter, r *http.Request, _ string) {
+	mux.routeWho("/api/admin/unkey", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		if s.Rig2 == nil {
 			writeJSON(w, 503, map[string]any{"status": "error",
 				"message": "this host has no radio to unkey"})
@@ -242,10 +228,10 @@ func (s *Server) registerAdmin(mux routeMux) {
 			return
 		}
 		writeJSON(w, 200, map[string]any{"status": "ok", "unkeyed": true})
-	}))
+	})
 
 	// What the host is, for a client deciding which controls to show.
-	mux.HandleFunc("/api/remote/status", s.guard(func(w http.ResponseWriter, r *http.Request) {
+	mux.route("/api/remote/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
 		writeJSON(w, 200, map[string]any{"status": "ok",
 			"rig":       s.Rig.Describe(),
@@ -255,7 +241,7 @@ func (s *Server) registerAdmin(mux routeMux) {
 			"recording": s.Rec != nil,
 			"lockdown":  s.Lock.On(),
 		})
-	}))
+	})
 }
 
 func token(r *http.Request) string {
