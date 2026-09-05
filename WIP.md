@@ -68,6 +68,27 @@ LSB, meter, link 0 ms.
 - The surface scrolls but had **no scrollbar**, so a card sliced at the viewport
   edge read as broken. `Scrollbar(thumbVisibility: true)` on a shared controller.
 
+### The Windows drive now asserts what is on the screen
+Two false results had to be beaten out of the harness before any of the above
+could be believed:
+
+- **It reported "the panel survived being given F13" after selecting *Pause*.**
+  Flutter aligns the SELECTED row with the button, so every menu row's absolute
+  position shifts with whatever is already chosen, and a fixed coordinate quietly
+  picks a different key. `tools/win_read.sh` now OCRs the KEY field and the step
+  fails if the wrong key is selected.
+- ⚠️ **`qm monitor sendkey f13` is ACCEPTED and delivers nothing.** A probe polling
+  `GetAsyncKeyState` inside Windows saw F12 (VK 0x7B) every time and never once
+  saw F13 (VK 0x7C). An F13 *press* test through this keyboard could never pass
+  however correct the app was, and read as "the PTT is broken". The press test
+  now uses F12 - same watcher, same table, only the virtual-key constant differs
+  - and F13 remains the crash test.
+
+Also fixed: the drive only checked the simulator on **localhost**, which says
+nothing about whether the panel can reach it; one run blamed the panel for a host
+that was simply not reachable from Windows. It now runs Test-NetConnection from
+the box under test.
+
 ## Next
 1. Rebuild, reinstall on the `clean` snapshot, run `tools/win_drive.sh` — prove
    F13 assigns without crashing and that a press keys the rig.
