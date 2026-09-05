@@ -1033,13 +1033,16 @@ class _PanelState extends State<Panel> {
     final recOn = _rec?['recording'] == true;
     final recOK = _rec?['available'] == true;
     final replay = _rec?['replay_seconds'] ?? 0;
+    // ⚠️ IT MUST NOT LOOK LIKE A CARD. On a narrow window this sits directly
+    // under the last scrolling card, and with the same fill and radius the two
+    // merged into one shape - so a strip that never scrolls read as part of the
+    // content that does.
     return Container(
-      margin: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
       decoration: BoxDecoration(
-          color: T.panel,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: _sendingSilence ? T.txRed : T.line)),
+          color: T.ground,
+          border: Border(
+              top: BorderSide(color: _sendingSilence ? T.txRed : T.line))),
       child: LayoutBuilder(builder: (context, box) {
         final wide = box.maxWidth > 820;
         final meters = [
