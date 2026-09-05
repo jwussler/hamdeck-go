@@ -67,6 +67,7 @@ func main() {
 	pttTimeout := flag.Duration("ptt-timeout", 180*time.Second, "the transmit watchdog: the host unkeys the rig after this long, whatever the client is doing")
 	audioList := flag.Bool("audio-list", false, "list the sound devices this machine has, by name")
 	audioProbe := flag.String("audio-probe", "", "open the capture device matching this card name, read for 3s, and report the PEAK")
+	audioLadder := flag.String("audio-ladder", "", "try every capture buffer size against this card and report which ones actually read - the honest way to pick the receive latency")
 	catPort := flag.Int("cat-proxy-port", 0, "serve raw CAT to other software on 127.0.0.1:<port> (4532 is the usual choice). 0 = off")
 	recDir := flag.String("record-dir", "", "directory for receive recordings. Empty = recording off")
 	replaySecs := flag.Int("replay-seconds", 60, "how much receive audio to keep for /api/record/replay")
@@ -75,6 +76,7 @@ func main() {
 	txRate := flag.Int("tx-rate", 44100, "the rate the host asks clients to transmit at when --tx-record is used with no sound card. Deliberately unlike the receive rate: a client that reuses the receive rate is the bug this catches")
 	tgxlHost := flag.String("tgxl", "", "antenna tuner host, e.g. 192.168.40.51. Empty = no tuner")
 	tgxlPort := flag.Int("tgxl-port", 9010, "antenna tuner TCP port")
+	audioBuf := flag.Int("audio-buffer", 0, "force the capture buffer size in frames; 0 = the built-in ladder. Smaller is less delay, and --audio-ladder says which sizes this codec can really do")
 	audioDev := flag.String("audio", "", "capture device to stream from, matched by card name (e.g. codec). `tone:<hz>` streams a test tone instead of the radio. Empty = no audio")
 	flag.Parse()
 
@@ -93,6 +95,42 @@ func main() {
 		}
 		for _, d := range devs {
 			fmt.Println("  " + d)
+		}
+		return
+	}
+	if *audioLadder != "" {
+		// ⚠️ THE SERVICE MUST BE STOPPED. ALSA hands the capture device to one
+		// process, so this refuses to be useful while the host holds it - and
+		// says so rather than reporting every size as broken.
+		fmt.Printf("trying capture buffer sizes on %q. The host must be stopped.\n\n", *audioLadder)
+		fmt.Printf("%8s  %10s  %8s  %9s  %7s  %s\n",
+			"ASKED", "NEGOTIATED", "LATENCY", "READ TIME", "PEAK", "RESULT")
+		best := 0
+		for _, r := range audio.Ladder(*audioLadder,
+			[]int{256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192}, 20) {
+			status := "ok"
+			if r.Err != "" {
+				status = "FAILED: " + r.Err
+			} else if r.Peak == 0 {
+				// ⚠️ Silence is a RESULT, not a pass: a size that reads frames
+				// and returns nothing is the trap this whole project keeps
+				// re-learning.
+				status = "reads, but SILENT - not usable"
+			} else if r.ElapsedMS > r.ExpectedMS*3/2 {
+				status = fmt.Sprintf("struggling: %d ms of audio took %d ms", r.ExpectedMS, r.ElapsedMS)
+			} else if best == 0 {
+				best = r.Negotiated
+				status = "ok  <- smallest that works"
+			}
+			fmt.Printf("%8d  %10d  %6d ms  %7d ms  %7d  %s\n",
+				r.Frames, r.Negotiated, r.LatencyMS, r.ElapsedMS, r.Peak, status)
+		}
+		fmt.Println()
+		if best > 0 {
+			fmt.Printf("Use --audio-buffer %d for %d ms of receive latency.\n",
+				best, best*1000/22050)
+		} else {
+			fmt.Println("Nothing smaller than the current setting reads cleanly on this codec.")
 		}
 		return
 	}
@@ -203,7 +241,7 @@ func main() {
 			log.Printf("audio in:  %s", stream.Describe())
 			log.Printf("⚠️  THIS HOST IS STREAMING A TEST TONE, NOT THE RADIO.")
 			tone = true
-		} else if err := stream.Start(*audioDev); err != nil {
+		} else if err := stream.StartSized(*audioDev, *audioBuf); err != nil {
 			log.Fatalf("FATAL: audio: %v", err)
 		} else {
 			log.Printf("audio in:  %s", stream.Describe())

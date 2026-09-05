@@ -74,9 +74,38 @@ func (s *Stream) Peak() int {
 // that trusted the negotiation picked a size that could never work, and the host
 // refused to start with a message about a device that was fine. The only honest
 // test of a size is reading with it.
-func (s *Stream) Start(match string) error {
+func (s *Stream) Start(match string) error { return s.StartSized(match, 0) }
+
+// StartSized opens the capture device, optionally at a size the operator chose.
+//
+// ⚠️ A FORCED SIZE IS STILL PROVEN BY A READ. --audio-buffer says which size to
+// try FIRST, not which size to trust: this codec accepts buffers it cannot then
+// read from, so an unchecked override would start a host whose receiver is
+// silent - which looks like a dead band, not a bad flag.
+func (s *Stream) StartSized(match string, forced int) error {
 	var lastErr error
-	for _, want := range []int{2048, 4096, 8192, 16384} {
+	// ⚠️ SMALL FIRST, AND THE ORDER IS THE WHOLE POINT. This started at 2048 and
+	// took the first size that survived a read, so this station ran on 8192
+	// frames - 371 ms of receive delay - for its entire life. The operator felt
+	// it every time he answered somebody.
+	//
+	// ⚠️ AND THE GAP IN THE MIDDLE IS REAL, MEASURED ON THE STATION'S OWN CODEC:
+	//
+	//     256  512  1024   read cleanly, 11/23/46 ms
+	//     1536 .. 6144     negotiate fine and then EIO on the first read
+	//     8192             reads cleanly again, 371 ms
+	//
+	// So "2048 failed, therefore smaller is impossible" was a conclusion drawn
+	// from one sample in the middle of the one range that does not work. Ask the
+	// device with --audio-ladder rather than reasoning about it.
+	//
+	// 512 is the default rather than 256: 23 ms is far below anything an
+	// operator notices, and it halves the syscall and packet rate of 11 ms.
+	sizes := []int{512, 1024, 2048, 4096, 8192, 16384}
+	if forced > 0 {
+		sizes = append([]int{forced}, sizes...)
+	}
+	for _, want := range sizes {
 		d, rate, ch, frames, err := tryOpen(match, want)
 		if err != nil {
 			lastErr = err

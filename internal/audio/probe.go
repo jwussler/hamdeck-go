@@ -137,3 +137,72 @@ func Probe(match string, dur time.Duration) (string, int, error) {
 	}
 	return "", 0, fmt.Errorf("no capture device matching %q", match)
 }
+
+// Ladder tries every capture buffer size and reports which ones actually WORK.
+//
+// ⚠️ THIS EXISTS BECAUSE 371 ms IS THE BIGGEST REMAINING DELAY AND NOBODY KNOWS
+// WHY IT HAS TO BE. The host's start-up ladder takes the first size that
+// survives a read and stops looking, so the station has been running on 8192
+// frames since the first night - not because smaller was proved impossible, but
+// because 2048 failed once and nothing tried anything in between.
+//
+// ⚠️ AND IT MEASURES RATHER THAN NEGOTIATES. This codec ACCEPTS sizes it then
+// cannot read from: the negotiation succeeds and the first Read returns EIO. So
+// each size here is opened, prepared, and READ from repeatedly - and the ones
+// that deliver audio are the only ones reported as usable.
+//
+// Run it with the service stopped: ALSA gives the capture device to one process.
+func Ladder(match string, sizes []int, reads int) []LadderResult {
+	out := make([]LadderResult, 0, len(sizes))
+	for _, want := range sizes {
+		r := LadderResult{Frames: want}
+		d, rate, ch, frames, err := tryOpen(match, want)
+		if err != nil {
+			r.Err = err.Error()
+			out = append(out, r)
+			continue
+		}
+		r.Negotiated, r.Rate, r.Channels = frames, rate, ch
+		r.LatencyMS = frames * 1000 / rate
+		buf := make([]byte, frames*d.BytesPerFrame())
+		start := time.Now()
+		peak := 0
+		for i := 0; i < reads; i++ {
+			if err := d.Read(buf); err != nil {
+				r.Err = fmt.Sprintf("read %d of %d: %v", i+1, reads, err)
+				break
+			}
+			for j := 0; j+1 < len(buf); j += 2 {
+				v := int(int16(uint16(buf[j]) | uint16(buf[j+1])<<8))
+				if v < 0 {
+					v = -v
+				}
+				if v > peak {
+					peak = v
+				}
+			}
+		}
+		r.Peak = peak
+		// ⚠️ Wall time against expected time. A size that "works" but takes
+		// twice as long as the audio it returned is a device fighting the
+		// buffer, and it will drop frames the moment anything else happens.
+		r.ElapsedMS = int(time.Since(start).Milliseconds())
+		r.ExpectedMS = reads * r.LatencyMS
+		d.Close()
+		out = append(out, r)
+	}
+	return out
+}
+
+// LadderResult is one buffer size, and whether the radio's audio came through it.
+type LadderResult struct {
+	Frames     int
+	Negotiated int
+	Rate       int
+	Channels   int
+	LatencyMS  int
+	ElapsedMS  int
+	ExpectedMS int
+	Peak       int
+	Err        string
+}
