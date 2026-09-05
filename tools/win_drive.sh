@@ -285,14 +285,28 @@ echo "== press the key AT THE KEYBOARD, the way a footswitch would"
 # The polling path does not vary by key - same watcher, same table, only the
 # virtual-key constant differs - so pressing a key the emulated keyboard CAN
 # deliver proves the mechanism. F13 stays the crash test above.
-# ⚠️ VERIFIED ON WORDING TOO, not just on the number. The row is FOUND by
-# wording because tesseract reads this UI's digits badly, and then the same
-# weakness bit the verify step: the KEY field reads back as "Fi2" or "F1i2"
-# often enough that matching "F12" failed on a selection that had worked.
-# Landing on F9 instead is the only other way to see "commonly bound", and
-# the press test below would then fail honestly - it is the real gate.
-WIN_FIND_LAST=1 choose "commonly bound" "commonly bound" && ok "switched to a key this keyboard can actually send" \
-    || fail "could not select F12 - the press below proves nothing"
+# ⚠️ CLICKED BY OFFSET FROM A KNOWN STATE, not searched for.
+#
+# Searching for this row kept failing where the F13 search succeeds, and the
+# reason the search was needed at all does not apply here: a row's position is
+# unpredictable only while we do not know what is selected. We DO know - F13 was
+# just selected and read back off the screen - and Flutter puts the selected row
+# on the button, so the rest of the list is fixed relative to it. F12 is the last
+# of eight and F13 is the second, six rows below at 48 px each.
+#
+# This is the sequence that worked by hand the first time the polling path was
+# proven: press count 0 -> 1, status "claimed" -> "system-wide", host unkeyed.
+key "esc" 0.6
+bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
+sleep 1.5
+bash "$(dirname "$0")/win_click.sh" "click 300,608" >/dev/null 2>&1
+sleep 2
+if bash "$(dirname "$0")/win_read.sh" $KEY_FIELD | grep -qE "commonly bound"; then
+    ok "switched to a key this emulated keyboard can actually deliver"
+else
+    fail "could not switch off F13 - the press below proves nothing, because"
+    echo "     qm sendkey f13 is accepted by the monitor and delivers nothing to Windows"
+fi
 BEFORE=$(wc -l < /tmp/windrive-host.log)
 key "f12" 2; key "f12" 2; key "f12" 2
 sleep 2
