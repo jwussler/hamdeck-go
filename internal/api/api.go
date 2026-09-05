@@ -464,6 +464,46 @@ func (s *Server) Handler() http.Handler {
 		return errBadPTT
 	})
 
+	// ⚠️ MUTE IS HOST STATE PLUS A CAT WRITE, and it belongs to the rig rather
+	// than the client: muting in the panel would leave the operator's own
+	// speaker at the radio still making noise, and the C++ host does it this way
+	// for that reason.
+	for _, m := range []struct {
+		path string
+		on   bool
+	}{{"/api/mute/on", true}, {"/api/mute/off", false}} {
+		m := m
+		mux.HandleFunc(m.path, s.guard(func(w http.ResponseWriter, r *http.Request) {
+			mr, ok := s.Rig.(interface{ SetMuted(bool) error })
+			if !ok {
+				writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
+					"message": "this host's radio cannot be muted"})
+				return
+			}
+			if err := mr.SetMuted(m.on); err != nil {
+				writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"status": "ok", "muted": m.on,
+				"rig": s.Rig.Snapshot()})
+		}))
+	}
+	mux.HandleFunc("/api/mute/toggle", s.guard(func(w http.ResponseWriter, r *http.Request) {
+		mr, ok := s.Rig.(interface{ SetMuted(bool) error })
+		if !ok {
+			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
+				"message": "this host's radio cannot be muted"})
+			return
+		}
+		want := !s.Rig.Snapshot().Muted
+		if err := mr.SetMuted(want); err != nil {
+			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"status": "ok", "muted": want,
+			"rig": s.Rig.Snapshot()})
+	}))
+
 	// ── The antenna tuner ───────────────────────────────────────────────────
 	//
 	// ⚠️ TWO ROUTES, TWO BOXES. /api/tune is the rig's own ATU; this is the

@@ -26,6 +26,14 @@ class WebTx implements TxCapture {
   @override
   MicDevice? device;
 
+  int _gain = 100;
+
+  @override
+  int get gain => _gain;
+
+  @override
+  set gain(int percent) => _gain = percent.clamp(0, 300);
+
   @override
   Future<List<MicDevice>> devices() async => const [];
 

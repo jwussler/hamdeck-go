@@ -1,14 +1,35 @@
 import 'dart:async';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:hotkey_manager/hotkey_manager.dart';
+import 'package:window_manager/window_manager.dart';
+
 import 'api.dart';
 import 'audio/audio.dart';
 import 'keymap.dart';
 import 'keypad.dart';
+import 'ptt.dart';
 import 'readout.dart';
+import 'settings.dart';
+import 'station_tray.dart';
 import 'theme.dart';
 
-void main() => runApp(const HamDeckApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb) {
+    // ⚠️ CLEAR ANY HOTKEY A PREVIOUS RUN LEFT REGISTERED. A crash can leave the
+    // key claimed at the OS, and the next launch would then find its own PTT
+    // "already taken by another application" - by itself.
+    await hotKeyManager.unregisterAll();
+    await windowManager.ensureInitialized();
+    // ⚠️ The window must ASK before it closes: closing may only hide, and if it
+    // is really quitting it has to release the transmitter first.
+    await windowManager.setPreventClose(true);
+  }
+  runApp(const HamDeckApp());
+}
 
 class HamDeckApp extends StatelessWidget {
   const HamDeckApp({super.key});
@@ -27,7 +48,7 @@ class Panel extends StatefulWidget {
   State<Panel> createState() => _PanelState();
 }
 
-class _PanelState extends State<Panel> {
+class _PanelState extends State<Panel> with WindowListener {
   // ⚠️ NO DEFAULT HOST, EVER. A hostname compiled into a published client points
   // every install at one person's station - the same rule as the C++ client.
   final _host = TextEditingController();
@@ -38,6 +59,46 @@ class _PanelState extends State<Panel> {
   // needing it at all means the host is not behind a proper name yet.
   final _port = TextEditingController();
   bool _advanced = false;
+
+  Settings? _settings;
+  late final GlobalPtt _ptt = GlobalPtt(
+    // ⚠️ THE GLOBAL KEY REFUSES TO KEY AN UNARMED STATION. Keying with no audio
+    // path is the silent-carrier failure this project has already paid for: the
+    // rig transmits, every counter reads healthy, and nothing goes out.
+    onDown: () async {
+      if (!_tx.running) {
+        announce(context, 'Not armed. Press E or click ARM first.', urgent: true);
+        return;
+      }
+      await _api?.send('/api/ptt/on');
+      await _refresh();
+    },
+    onUp: (why) async {
+      await _api?.send('/api/ptt/off');
+      if (mounted && why.isNotEmpty && !why.startsWith('key rele')) {
+        announce(context, 'Stopped transmitting: \$why', urgent: true);
+      }
+      await _refresh();
+    },
+    onChanged: () {
+      if (mounted) setState(() {});
+    },
+  );
+  late final StationTray _tray = StationTray(
+    onShow: () async {
+      await windowManager.show();
+      await windowManager.focus();
+    },
+    // ⚠️ QUIT RELEASES, ALWAYS: disarm, unkey, close the socket. The host then
+    // puts MOD SOURCE back to MIC - otherwise the operator walks to the radio
+    // and finds the hand mic dead for a client they cannot see.
+    onQuit: () async {
+      await _ptt.unregister();
+      await _api?.send('/api/ptt/off');
+      await _tx.stop();
+      await _rx.stop();
+    },
+  );
 
   // Receiver levels, read from the radio at connect and after every change.
   // ⚠️ NOT in the 2 Hz poll: every read is a CAT exchange on a serial line that
@@ -54,6 +115,8 @@ class _PanelState extends State<Panel> {
   String? _error;
   Timer? _poll;
   List<MicDevice> _mics = const [];
+  List<OutDevice> _speakers = const [];
+  String _speaker = '';
   bool _tuning = false;
   Map<String, dynamic>? _meters;
   Map<String, dynamic>? _rec;
@@ -100,8 +163,35 @@ class _PanelState extends State<Panel> {
     return sum ~/ _rtt.length;
   }
 
+  /// ⚠️ CLOSING MAY ONLY HIDE - AND A HIDDEN PANEL STILL HOLDS THE TRANSMITTER.
+  /// That is deliberate: keying from the logger is the point of a system-wide
+  /// key. But the operator has to be told, once, or an app that vanishes is one
+  /// they assume has stopped.
+  @override
+  void onWindowClose() async {
+    final st = _settings;
+    if (!kIsWeb && (st?.closeToTray ?? true) && _tray.available) {
+      await windowManager.hide();
+      if (_tray.takeFirstHideWarning() && mounted) {
+        await _tray.update(armed: _tx.running, onAir: _rig?['tx'] == true);
+      }
+      return;
+    }
+    // No tray, or the operator asked for close to mean quit: release first.
+    await _ptt.unregister();
+    await _api?.send('/api/ptt/off');
+    await _tx.stop();
+    await _rx.stop();
+    await windowManager.destroy();
+  }
+
   @override
   void dispose() {
+    if (!kIsWeb) {
+      windowManager.removeListener(this);
+      _tray.stop();
+      _ptt.unregister();
+    }
     _poll?.cancel();
     _keyFocus.dispose();
     _rx.stop();
@@ -124,6 +214,11 @@ class _PanelState extends State<Panel> {
     // was drawn. The web fix broke the desktop build, and only launching it
     // showed that. There is deliberately no default host on desktop: a hostname
     // compiled into a published client points every install at one station.
+    _restore();
+    if (!kIsWeb) {
+      windowManager.addListener(this);
+      _tray.start();
+    }
     final base = Uri.base;
     if (base.scheme == 'http' || base.scheme == 'https') {
       // ⚠️ THE NAME, NOT THE ORIGIN. Filling this with "https://station.example.com"
@@ -138,6 +233,62 @@ class _PanelState extends State<Panel> {
     }
   }
 
+  /// ⚠️ EVERYTHING EXCEPT THE PASSWORD. A panel that stores the credential for
+  /// a transmitter turns "somebody used my laptop" into "somebody transmitted on
+  /// my licence"; the username is remembered because it is not a secret and it
+  /// is the tedious half to retype.
+  Future<void> _restore() async {
+    if (kIsWeb) return;
+    final st = await Settings.load();
+    if (!mounted) return;
+    setState(() {
+      _settings = st;
+      if (_host.text.isEmpty) _host.text = st.host;
+      if (_port.text.isEmpty) _port.text = st.port;
+      _advanced = _advanced || st.port.isNotEmpty;
+      _user.text = st.username;
+      _step = st.step;
+      _rx.volume = st.volume;
+      _tx.gain = st.micGain;
+    });
+    await _ptt.use(st.pttKey, hold: st.pttHold);
+    if (st.speakerName.isNotEmpty) await _rx.useOutput(st.speakerName);
+  }
+
+  void _remember() {
+    final st = _settings;
+    if (st == null) return;
+    st.host = _host.text.trim();
+    st.port = _port.text.trim();
+    st.username = _user.text.trim();
+    st.step = _step;
+    st.volume = _rx.volume;
+    st.micGain = _tx.gain;
+  }
+
+  /// Ask the radio what it is, and keep the audio in step with the key.
+  Future<void> _refresh() async {
+    final st = await _api?.status();
+    if (!mounted || st == null) return;
+    setState(() => _rig = st);
+    _syncKeyed(st['tx'] == true);
+  }
+
+  /// ⚠️ WHAT YOU HEAR AND WHAT THE RADIO IS DOING MUST BE THE SAME MOMENT. The
+  /// receive path runs about half a second behind the band, so an operator who
+  /// keys up hears their own over land late and every transmission pushes the
+  /// audio further behind. Keying silences receive AND drops what arrives during
+  /// it, so unkeying rejoins the band live rather than replaying the last
+  /// thirty seconds. The tray icon follows the same state.
+  void _syncKeyed(bool tx) {
+    if (_wasKeyed == tx) return;
+    _wasKeyed = tx;
+    _rx.keyed = tx;
+    if (!kIsWeb) _tray.update(armed: _tx.running, onAir: tx);
+  }
+
+  bool _wasKeyed = false;
+
   Future<void> _connect() async {
     if (_host.text.trim().isEmpty &&
         !(Uri.base.scheme == 'http' || Uri.base.scheme == 'https')) {
@@ -151,6 +302,10 @@ class _PanelState extends State<Panel> {
       setState(() => _error = err);
       return;
     }
+    // ⚠️ REMEMBERED ONLY AFTER A LOGIN THAT WORKED. Saving what was typed on
+    // every keystroke would faithfully remember a typo and hand it back next
+    // launch as though it were the station's address.
+    _remember();
     // The password has been used; it is not kept in a field afterwards.
     _pass.clear();
     setState(() {
@@ -195,6 +350,7 @@ class _PanelState extends State<Panel> {
           _wasTx = nowTx;
           announce(context, nowTx ? 'Transmitting' : 'Receiving', urgent: true);
         }
+        _syncKeyed(nowTx);
         final nowSilent = _sendingSilence;
         if (nowSilent && !_wasSilent) {
           announce(context,
@@ -353,8 +509,13 @@ class _PanelState extends State<Panel> {
   // them apart, so the level is what gets the loud treatment.
   Future<void> _loadMics() async {
     final list = await _tx.devices();
+    final outs = await _rx.outputs();
     if (!mounted) return;
-    setState(() => _mics = list);
+    setState(() {
+      _mics = list;
+      _speakers = outs;
+      _speaker = _settings?.speakerName ?? '';
+    });
     // Meter the microphone straight away. Nothing is sent and the radio is not
     // touched - it just means a dead microphone is visible before it matters.
     if (!_tx.running) await _tx.startMonitor();
@@ -514,6 +675,11 @@ class _PanelState extends State<Panel> {
         const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _changeStep(-1),
         const SingleActivator(LogicalKeyboardKey.keyF): () =>
             setState(() => _keypad = !_keypad),
+        // ⚠️ The settings surface needs a key of its own: everything else on
+        // this panel is reachable without a mouse, and a page that is not is a
+        // page a keyboard-only operator cannot configure the keyboard from.
+        const SingleActivator(LogicalKeyboardKey.comma): () =>
+            setState(() => _surface = _surface == 0 ? 1 : 0),
 
         // Mode.
         const SingleActivator(LogicalKeyboardKey.keyL): () => _api!.send('/api/mode/lsb'),
@@ -950,11 +1116,16 @@ class _PanelState extends State<Panel> {
           _key('LOCK', () => _send('/api/toggle/lock'),
               small: true, on: _rig?['vfo_locked'] == true),
         ]),
-        _group('RIT'),
-        _grid(3, [
+        _group('RIT  ·  XIT'),
+        _grid(4, [
           _key('−100', () => _send('/api/rit/down'), small: true),
           _key('CLEAR', () => _send('/api/rit/clear'), small: true),
           _key('+100', () => _send('/api/rit/up'), small: true),
+          // ⚠️ XIT shifts the TRANSMIT frequency and RIT shifts receive. They
+          // are one letter apart and opposite in effect, so this one says which
+          // it is by being lit from the radio's own reading.
+          _key('XIT', () => _send('/api/xit/toggle'),
+              small: true, on: _rig?['xit'] == true),
         ]),
         // ⚠️ The step the ARROW KEYS move by, shown as a control rather than
         // only as text - an operator who cannot see the hint line still has to
@@ -966,21 +1137,10 @@ class _PanelState extends State<Panel> {
                 () => setState(() => _step = s),
                 small: true, on: _step == s),
         ]),
-      ]);
-
-  Widget _colReceiver() => _card([
-        _group('RECEIVER'),
-        _grid(4, [
-          _key('AGC', () => _send('/api/agc/cycle'), small: true),
-          _key('PRE', () => _send('/api/preamp/cycle'), small: true),
-          _key('ANT', () => _send('/api/ant/toggle'), small: true),
-          _key('NOTCH', () => _send('/api/notch/toggle'), small: true),
-        ]),
-        const SizedBox(height: 2),
-        _levelSlider('AF', _af, 255, (v) => _send('/api/volume/set/$v'),
-            (v) => setState(() => _af = v)),
-        _levelSlider('RF', _rf, 255, (v) => _send('/api/rf-gain/set/$v'),
-            (v) => setState(() => _rf = v)),
+        // ⚠️ TRANSMIT LIVES HERE, not under the receiver, because the receiver
+        // column grew: NB, NR, ATT and MUTE pushed MON and COMP off the bottom
+        // edge of a 712-px window - controls that are present in the code and
+        // invisible on the screen, which is the same fault as not having them.
         _group('TRANSMIT'),
         _levelSlider('PWR', (_rig?['power'] as num?)?.toInt() ?? 0, 100,
             (v) => _send('/api/power/set/$v'),
@@ -993,31 +1153,239 @@ class _PanelState extends State<Panel> {
         ]),
       ]);
 
+  Widget _colReceiver() => _card([
+        _group('RECEIVER'),
+        // ⚠️ NB, NR, ATT and XIT were on the older client and missing here, and
+        // they are not decoration: a noise blanker left on and a panel that
+        // cannot say so is ten minutes of wondering why a signal sounds wrong.
+        // The state comes off the RADIO - polled twice a second - so the lit
+        // ones are lit because the rig says so.
+        _grid(4, [
+          _key('AGC', () => _send('/api/agc/cycle'), small: true),
+          _key('PRE', () => _send('/api/preamp/cycle'), small: true),
+          _key('NOTCH', () => _send('/api/notch/toggle'), small: true),
+          _key('NB', () => _send('/api/nb/toggle'),
+              small: true, on: _rig?['nb'] == true),
+          _key('NR', () => _send('/api/nr/toggle'),
+              small: true, on: _rig?['nr'] == true),
+          _key('ATT ${_rig?['att'] ?? 0}', () => _send('/api/att/cycle'),
+              small: true, on: ((_rig?['att'] as num?)?.toInt() ?? 0) > 0),
+          _key('MUTE', () => _send('/api/mute/toggle'),
+              small: true, on: _rig?['muted'] == true),
+          // ⚠️ ANT cycles on the rig, so it shows which one is selected rather
+          // than pretending to be three buttons that each know their state.
+          _key('ANT', () => _send('/api/ant/toggle'), small: true),
+        ]),
+        const SizedBox(height: 2),
+        _levelSlider('AF', _af, 255, (v) => _send('/api/volume/set/$v'),
+            (v) => setState(() => _af = v)),
+        _levelSlider('RF', _rf, 255, (v) => _send('/api/rf-gain/set/$v'),
+            (v) => setState(() => _rf = v)),
+      ]);
+
   // ── SETUP: nothing here is touched during a contact ───────────────────
-  Widget _setup() => Padding(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-        child: Column(children: [
+  //
+  // ⚠️ THIS IS WHERE THE OLDER CLIENTS BEAT THIS ONE. They kept the station, the
+  // account, both audio devices, the gains and the PTT key; this panel asked for
+  // all of it again every launch and offered no key at all.
+  Widget _setup() => LayoutBuilder(builder: (context, box) {
+        // ⚠️ TWO COLUMNS WHERE THERE IS ROOM. A settings page of full-width cards
+        // each holding one dropdown is the same wasted screen the operating
+        // surface had, and it pushed the speaker chooser off the bottom.
+        final wide = box.maxWidth >= 1000;
+        final left = <Widget>[
+          ..._setupPtt(), const SizedBox(height: 10),
+          ..._setupWindow(), const SizedBox(height: 10), ..._setupStation(),
+        ];
+        final right = <Widget>[
+          ..._setupMic(), const SizedBox(height: 10), ..._setupSpeaker(),
+        ];
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: wide
+              ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  // ⚠️ stretch, or a card shrinks to its content and sits
+                  // centred in its column looking like a rendering fault.
+                  Expanded(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: left)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: right)),
+                ])
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [...left, const SizedBox(height: 10), ...right]),
+        );
+      });
+
+  List<Widget> _setupPtt() => [
+          _card([
+            _group('PUSH TO TALK'),
+            // ⚠️ THE KEY IS TAKEN FROM EVERY OTHER APPLICATION on this machine
+            // for as long as the panel runs, so the cost of each choice is in
+            // the list rather than discovered later in the logger.
+            Row(children: [
+              SizedBox(width: 92, child: Text('KEY', style: T.silk())),
+              Expanded(
+                child: _dropdown<String>(
+                  value: _ptt.keyName,
+                  items: [
+                    for (final (name, why) in GlobalPtt.choices)
+                      (name, '$name — $why'),
+                  ],
+                  onChanged: (v) async {
+                    await _ptt.use(v, hold: _settings?.pttHold ?? true);
+                    _settings?.pttKey = v;
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            Row(children: [
+              SizedBox(width: 92, child: Text('MODE', style: T.silk())),
+              _key('HOLD', () async {
+                _settings?.pttHold = true;
+                await _ptt.use(_ptt.keyName, hold: true);
+              }, small: true, width: 92, on: (_settings?.pttHold ?? true)),
+              const SizedBox(width: 6),
+              _key('TOGGLE', () async {
+                _settings?.pttHold = false;
+                await _ptt.use(_ptt.keyName, hold: false);
+              }, small: true, width: 92, on: !(_settings?.pttHold ?? true)),
+            ]),
+            const SizedBox(height: 6),
+            // ⚠️ THE PANEL NAMES THE MODE THAT IS ARMED and never leaves it to be
+            // inferred: a PTT that has silently become a latch is a stuck
+            // transmitter waiting to happen.
+            Text('${_ptt.status}   ·   ${_ptt.presses} presses',
+                style: TextStyle(
+                    fontFamily: T.mono,
+                    fontSize: 10,
+                    color: _ptt.active ? T.okGreen : T.dim)),
+            const SizedBox(height: 4),
+            Text(
+                'the panel keys for at most 150 s on one hold — the host unkeys '
+                'at 180 s whatever this app is doing',
+                style: const TextStyle(
+                    fontFamily: T.mono, fontSize: 9, color: T.dim)),
+          ]),
+      ];
+
+  List<Widget> _setupMic() => [
           _card([
             _group('MICROPHONE'),
             _micPicker(),
-            const SizedBox(height: 4),
-            Text(
-                _tx.status.isEmpty ? 'not started' : _tx.status,
+            const SizedBox(height: 2),
+            _levelSlider('GAIN', _tx.gain, 300, (v) async {
+              _tx.gain = v;
+              _settings?.micGain = v;
+            }, (v) => setState(() => _tx.gain = v), colour: T.okGreen),
+            Text(_tx.status.isEmpty ? 'not started' : _tx.status,
                 style: const TextStyle(
                     fontFamily: T.mono, fontSize: 10, color: T.dim)),
           ]),
-          const SizedBox(height: 10),
+      ];
+
+  List<Widget> _setupSpeaker() => [
+          _card([
+            _group('SPEAKER'),
+            Row(children: [
+              SizedBox(width: 92, child: Text('OUTPUT', style: T.silk())),
+              Expanded(
+                child: _dropdown<String>(
+                  value: _speaker,
+                  items: [('', 'system default'), for (final d in _speakers) (d.id, d.label)],
+                  onChanged: (v) async {
+                    setState(() => _speaker = v);
+                    _settings?.speakerName = v;
+                    await _rx.useOutput(v.isEmpty ? null : v);
+                  },
+                ),
+              ),
+            ]),
+            const SizedBox(height: 2),
+            // ⚠️ THIS IS THIS COMPUTER'S VOLUME, not the radio's AF gain - the
+            // rig's knob is shared with whoever is sitting in front of it.
+            _levelSlider('VOLUME', _rx.volume, 150, (v) async {
+              _rx.volume = v;
+              _settings?.volume = v;
+            }, (v) => setState(() => _rx.volume = v)),
+            Text('receive ${_rx.status}',
+                style: const TextStyle(
+                    fontFamily: T.mono, fontSize: 10, color: T.dim)),
+          ]),
+      ];
+
+  List<Widget> _setupWindow() => [
+          _card([
+            _group('WINDOW'),
+            Row(children: [
+              _key('CLOSE HIDES', () {
+                _settings?.closeToTray = true;
+                setState(() {});
+              }, small: true, width: 128, on: (_settings?.closeToTray ?? true)),
+              const SizedBox(width: 6),
+              _key('CLOSE QUITS', () {
+                _settings?.closeToTray = false;
+                setState(() {});
+              }, small: true, width: 128, on: !(_settings?.closeToTray ?? true)),
+            ]),
+            const SizedBox(height: 6),
+            // ⚠️ SAID OUT LOUD, because it is the hazard: a hidden panel still
+            // holds the transmitter and the radio stays on REAR/USB.
+            const Text(
+                'hidden, the panel keeps the radio: it stays armed and the rig '
+                'stays on REAR/USB. Quit from the tray to hand the microphone '
+                'back.',
+                style: TextStyle(
+                    fontFamily: T.mono, fontSize: 9, color: T.dim, height: 1.5)),
+          ]),
+      ];
+
+  List<Widget> _setupStation() => [
           _card([
             _group('THIS STATION'),
             Text(
                 'host ${_api?.base ?? "—"}\n'
-                'receive ${_rx.status}\n'
                 'transmit routing: '
                 '${_tx.radioRouting.isEmpty ? "not armed" : _tx.radioRouting}',
                 style: const TextStyle(
                     fontFamily: T.mono, fontSize: 11, color: T.dim, height: 1.6)),
           ]),
-        ]),
+      ];
+
+
+  /// A dropdown in the panel's own clothes.
+  Widget _dropdown<X>({
+    required String value,
+    required List<(String, String)> items,
+    required void Function(String) onChanged,
+  }) =>
+      Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: BoxDecoration(
+            color: T.panelDeep,
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: T.line)),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<String>(
+            isExpanded: true,
+            value: items.any((i) => i.$1 == value) ? value : items.first.$1,
+            dropdownColor: T.panel,
+            style: const TextStyle(color: T.text, fontFamily: T.mono, fontSize: 11),
+            items: [
+              for (final (v, label) in items)
+                DropdownMenuItem(value: v, child: Text(label, overflow: TextOverflow.ellipsis)),
+            ],
+            onChanged: (v) => onChanged(v ?? ''),
+          ),
+        ),
       );
 
   // ── Audio and the recorder ────────────────────────────────────────────
@@ -1291,7 +1659,7 @@ class _PanelState extends State<Panel> {
   // ── The pieces every card is built from ───────────────────────────────
 
   Widget _card(List<Widget> children) => Container(
-        padding: const EdgeInsets.fromLTRB(10, 9, 10, 11),
+        padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
         decoration: BoxDecoration(
             color: T.panel,
             borderRadius: BorderRadius.circular(6),
@@ -1301,7 +1669,7 @@ class _PanelState extends State<Panel> {
       );
 
   Widget _group(String title) => Padding(
-        padding: const EdgeInsets.only(top: 2, bottom: 7),
+        padding: const EdgeInsets.only(top: 1, bottom: 5),
         child: Text(title, style: T.silk()),
       );
 
@@ -1313,7 +1681,7 @@ class _PanelState extends State<Panel> {
     for (var i = 0; i < keys.length; i += columns) {
       final slice = keys.sublist(i, (i + columns).clamp(0, keys.length));
       rows.add(Padding(
-        padding: EdgeInsets.only(bottom: i + columns < keys.length ? 6 : 0),
+        padding: EdgeInsets.only(bottom: i + columns < keys.length ? 5 : 0),
         child: Row(children: [
           for (var c = 0; c < columns; c++) ...[
             if (c > 0) const SizedBox(width: 6),
@@ -1331,7 +1699,7 @@ class _PanelState extends State<Panel> {
           {bool on = false, bool small = false, double? width}) =>
       SizedBox(
         width: width,
-        height: small ? 38 : 44,
+        height: small ? 34 : 40,
         child: OutlinedButton(
           style: OutlinedButton.styleFrom(
               backgroundColor: on ? T.cyanFill : T.panelDeep,
@@ -1367,7 +1735,7 @@ class _PanelState extends State<Panel> {
         padding: const EdgeInsets.only(bottom: 2),
         child: Row(children: [
           SizedBox(
-            width: 62,
+            width: 66,
             child: Text('$label $value',
                 style: const TextStyle(
                     fontFamily: T.mono, fontSize: 10, color: T.dim)),

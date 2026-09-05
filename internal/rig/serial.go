@@ -41,6 +41,14 @@ type Serial struct {
 	cat sync.Mutex
 	// When the last EX menu write went out - see send().
 	lastMenu time.Time
+	// ⚠️ Counts polls so the receiver settings are read on a DECIMATED cycle.
+	// See pollOnce: they change when a human presses something, not four times
+	// a second, and every read is a CAT exchange on a line that answers one
+	// question at a time.
+	tick int
+	// AF gain before a mute, so unmuting puts back what was there rather than a
+	// number this program chose. Ported from the C++ host.
+	preMuteAF int
 }
 
 func OpenSerial(dev string, baud int) (*Serial, error) {
@@ -181,6 +189,22 @@ func (s *Serial) pollOnce() {
 	// a confident 0 through a keyed carrier - which on the one screen an
 	// operator checks after tuning is exactly the wrong number to invent.
 	// RM4/RM5/RM6 answer THREE digits at offset 3, like SM0 and unlike PC.
+	// ⚠️ EVERY EIGHTH POLL - twice a second, not eight times. These come off the
+	// same serial line as the frequency and the meters, and a receiver setting
+	// that is half a second stale has never cost anybody a contact.
+	s.mu.Lock()
+	s.tick++
+	slow := s.tick%8 == 0
+	s.mu.Unlock()
+	var nb, nr, att, xit string
+	var nbe, nre, atte, xite error
+	if slow {
+		nb, nbe = s.ask("NB0;")
+		nr, nre = s.ask("NR0;")
+		att, atte = s.ask("RA0;")
+		xit, xite = s.ask("XT;")
+	}
+
 	alc, aerr := s.ask("RM4;")
 	pmtr, pmerr := s.ask("RM5;")
 	swr, swerr := s.ask("RM6;")
@@ -235,6 +259,25 @@ func (s *Serial) pollOnce() {
 			if raw, err := strconv.Atoi(m.reply[3:6]); err == nil {
 				*m.into = raw
 			}
+		}
+	}
+	// ⚠️ Each of these is left ALONE when the read failed or was skipped - a
+	// receiver setting reported as "off" because nobody asked is a confident
+	// wrong answer about the operator's own radio.
+	if slow {
+		if nbe == nil && strings.HasPrefix(nb, "NB0") && len(nb) >= 4 {
+			s.snap.NB = nb[3] != '0'
+		}
+		if nre == nil && strings.HasPrefix(nr, "NR0") && len(nr) >= 4 {
+			s.snap.NR = nr[3] != '0'
+		}
+		if atte == nil && strings.HasPrefix(att, "RA0") && len(att) >= 4 {
+			if n, err := strconv.Atoi(att[3:4]); err == nil {
+				s.snap.Att = n
+			}
+		}
+		if xite == nil && strings.HasPrefix(xit, "XT") && len(xit) >= 3 {
+			s.snap.XIT = xit[2] != '0'
 		}
 	}
 	if ok {
@@ -425,6 +468,39 @@ func (s *Serial) RemoteTXState() (rear bool, usb bool, err error) {
 	rear = len(r1) > 0 && r1[len(r1)-1] == '1'
 	usb = len(r2) > 0 && r2[len(r2)-1] == '1'
 	return rear, usb, nil
+}
+
+// SetMuted takes the receiver's audio down and puts it back.
+//
+// ⚠️ IT REMEMBERS WHAT WAS THERE. Muting is AG0000; and unmuting has to restore
+// the operator's own AF level, not a number this program picked - the C++ host
+// keeps pre_mute_af for exactly that. Unmuting to a default is a receiver that
+// comes back at the wrong volume, which on a quiet band is indistinguishable
+// from still being muted.
+func (s *Serial) SetMuted(on bool) error {
+	if on {
+		cur, err := s.ask("AG0;")
+		s.mu.Lock()
+		if err == nil && strings.HasPrefix(cur, "AG0") && len(cur) >= 6 {
+			if n, cerr := strconv.Atoi(cur[3:6]); cerr == nil && n > 0 {
+				s.preMuteAF = n
+			}
+		}
+		s.snap.Muted = true
+		s.mu.Unlock()
+		return s.send("AG0000;")
+	}
+	s.mu.Lock()
+	back := s.preMuteAF
+	s.snap.Muted = false
+	s.mu.Unlock()
+	if back <= 0 {
+		// ⚠️ Nothing remembered - say so by refusing rather than inventing a
+		// level. The operator can move the slider; a wrong guess on a receiver
+		// is a fault they have to diagnose.
+		return fmt.Errorf("no earlier AF level was recorded - set the volume instead")
+	}
+	return s.send(fmt.Sprintf("AG0%03d;", back))
 }
 
 // Unkey is called when the last client goes away. ⚠️ A dropped link must not

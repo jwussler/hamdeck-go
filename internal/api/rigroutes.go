@@ -124,6 +124,12 @@ func (s *Server) registerCAT(mux routeMux) {
 
 	// One verb, no argument.
 	simple := map[string]string{
+		"/api/nb/on":      "NB01;",
+		"/api/nb/off":     "NB00;",
+		"/api/nr/on":      "NR01;",
+		"/api/nr/off":     "NR00;",
+		"/api/xit/on":     "XT1;",
+		"/api/xit/off":    "XT0;",
 		"/api/preamp/on":  "PA01;",
 		"/api/preamp/off": "PA00;",
 		"/api/comp/on":    "PR02;",
@@ -161,6 +167,9 @@ func (s *Server) registerCAT(mux routeMux) {
 		modulo             int
 	}{
 		{"/api/agc/cycle", "GT0;", "GT0%d;", 4},
+		// ⚠️ FOUR POSITIONS: off, and three pads. RA0 on this radio answers a
+		// single digit, so the cycle wraps at 4 the same way AGC does.
+		{"/api/att/cycle", "RA0;", "RA0%d;", 4},
 		{"/api/preamp/cycle", "PA0;", "PA0%d;", 3},
 		{"/api/ant/toggle", "AN0;", "AN0%d;", 3},
 	}
@@ -178,7 +187,15 @@ func (s *Server) registerCAT(mux routeMux) {
 	}
 
 	// Two-state toggles, each read back first.
+	//
+	// ⚠️ NB, NR, ATT and XIT ARE PORTED VERBS, NOT INVENTED ONES. Every one is
+	// what the C++ host sends - NB0, NR0, RA0, XT - and this project has already
+	// paid once for a made-up EX write aimed at a live radio. A control that does
+	// not exist is better than a control that changes a menu nobody asked for.
 	toggles := []struct{ path, query, off, on string }{
+		{"/api/nb/toggle", "NB0;", "NB00;", "NB01;"},
+		{"/api/nr/toggle", "NR0;", "NR00;", "NR01;"},
+		{"/api/xit/toggle", "XT;", "XT0;", "XT1;"},
 		{"/api/comp/toggle", "PR0;", "PR01;", "PR02;"},
 		{"/api/mon/toggle", "ML0;", "ML0000;", "ML0001;"},
 		{"/api/notch/toggle", "BC0;", "BC00;", "BC01;"},

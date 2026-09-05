@@ -39,12 +39,17 @@ HOST = os.path.join(ROOT, "hamdeck-host")
 PORT, CTRL, CDP = 5911, 5910, 9311
 USER, PASSWORD = "shoot", "shoot-only"
 
-# name, window size, keyed
+# name, window size, keyed, press "," for the settings surface
+#
+# ⚠️ SETUP IS IN THE SET. It holds the PTT key, both audio devices and the gains
+# - the page most likely to run off the bottom of a window, and the one a
+# screenshot of the operating surface would never show.
 SHOTS = [
-    ("operate-1536x712", (1536, 712), False),
-    ("keyed-1536x712", (1536, 712), True),
-    ("operate-1100x800", (1100, 800), False),
-    ("operate-760x900", (760, 900), False),
+    ("operate-1536x712", (1536, 712), False, False),
+    ("keyed-1536x712", (1536, 712), True, False),
+    ("setup-1536x712", (1536, 712), False, True),
+    ("operate-1100x800", (1100, 800), False, False),
+    ("operate-760x900", (760, 900), False, False),
 ]
 
 
@@ -163,11 +168,14 @@ def main():
             data=json.dumps({"username": USER, "password": PASSWORD}).encode(),
             headers={"Content-Type": "application/json"}), timeout=6).read())["token"]
 
-        for name, size, keyed in SHOTS:
+        for name, size, keyed, setup in SHOTS:
             api(token, "/api/ptt/on" if keyed else "/api/ptt/off")
             b = Browser(size)
             try:
                 b.login(f"http://127.0.0.1:{PORT}/")
+                if setup:
+                    b.key(188, ",", ",")
+                    time.sleep(2)
                 path = os.path.join(out, f"{name}.png")
                 b.shot(path)
                 print(f"  {path}")

@@ -61,6 +61,7 @@ const keyMap = <String, List<Key>>{
     Key('T', 'tune the antenna tuner'),
   ],
   'PANEL': [
+    Key(',', 'OPERATE / SETUP'),
     Key('tab', 'move between controls'),
     Key('?', 'show or hide this list'),
   ],

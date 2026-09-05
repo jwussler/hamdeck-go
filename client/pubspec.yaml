@@ -39,6 +39,10 @@ dependencies:
   record: ^7.1.1
   web_socket_channel: ^3.0.3
   flutter_soloud: ^5.0.0
+  shared_preferences: ^2.5.5
+  hotkey_manager: ^0.2.3
+  tray_manager: ^0.5.3
+  window_manager: ^0.5.2
 
 dev_dependencies:
   flutter_test:
@@ -56,6 +60,9 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+
+  assets:
+    - assets/tray/
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

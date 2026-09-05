@@ -44,6 +44,15 @@ type Snapshot struct {
 	TxTimeout   int    `json:"tx_timeout_in"`
 	FreqBuf     string `json:"freq_buffer"`
 	VFOLocked   bool   `json:"vfo_locked"`
+	// ⚠️ THE RECEIVER SETTINGS THE OPERATOR CAN SEE ON THE RIG'S OWN FRONT PANEL.
+	// Ported from the C++ host, which carries them for a reason: a noise blanker
+	// that is on and a panel that cannot say so is how an operator spends ten
+	// minutes wondering why a signal sounds wrong.
+	NB     bool `json:"nb"`
+	NR     bool `json:"nr"`
+	Att    int  `json:"att"`
+	XIT    bool `json:"xit"`
+	Muted  bool `json:"muted"`
 	Diversity   bool   `json:"diversity"`
 	AmpTuning   bool   `json:"amp_tuning"`
 	TgxlTune    bool   `json:"tgxl_tuning"`

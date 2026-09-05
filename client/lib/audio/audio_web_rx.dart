@@ -19,6 +19,10 @@ import 'audio.dart';
 /// stream sounds like a chipmunk and looks like a fault at the radio.
 class WebRx implements RxPlayer {
   web.AudioContext? _ctx;
+  // ⚠️ A REAL GAIN NODE. A volume control that adjusts nothing is worse than no
+  // volume control - the operator turns it down, hears no change, and goes
+  // looking for a fault at the radio.
+  web.GainNode? _gainNode;
   web.WebSocket? _sock;
   double _playhead = 0;
   int _rate = 22050;
@@ -28,6 +32,35 @@ class WebRx implements RxPlayer {
   /// This is the client's own measurement - not the host's - so the two can
   /// disagree, and a disagreement is the interesting case: it means the audio
   /// left the radio and did not reach the operator.
+  // ⚠️ THE BROWSER CHOOSES THE SPEAKER, NOT THIS CODE. Web Audio plays to the
+  // device the browser is set to; offering a chooser here would be a control
+  // that changes nothing, which is worse than no control.
+  @override
+  Future<List<OutDevice>> outputs() async => const [];
+
+  @override
+  Future<void> useOutput(String? name) async {}
+
+  bool _keyed = false;
+
+  @override
+  set keyed(bool on) {
+    _keyed = on;
+    _gainNode?.gain.value = on ? 0 : _volume / 100.0;
+    if (!on) level = 0;
+  }
+
+  int _volume = 100;
+
+  @override
+  int get volume => _volume;
+
+  @override
+  set volume(int percent) {
+    _volume = percent.clamp(0, 150);
+    _gainNode?.gain.value = _volume / 100.0;
+  }
+
   @override
   int level = 0;
   DateTime _levelAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -50,6 +83,9 @@ class WebRx implements RxPlayer {
     status = 'connecting';
     final ctx = web.AudioContext();
     _ctx = ctx;
+    _gainNode = ctx.createGain()
+      ..gain.value = _volume / 100.0
+      ..connect(ctx.destination);
     final s = web.WebSocket(url);
     s.binaryType = 'arraybuffer';
     _sock = s;
@@ -85,6 +121,15 @@ class WebRx implements RxPlayer {
   void _play(Uint8List bytes) {
     final ctx = _ctx;
     if (ctx == null) return;
+    // ⚠️ DROPPED WHILE KEYED, not queued at zero volume. Web Audio schedules
+    // each buffer against a playhead, so muted packets still consume the
+    // timeline - unkey and the operator hears their own over played back before
+    // the band returns, further behind after every transmission.
+    if (_keyed) {
+      packets++;
+      _playhead = 0; // rejoin the live stream rather than the schedule
+      return;
+    }
 
     final frames = bytes.lengthInBytes ~/ 2 ~/ _channels;
     if (frames == 0) return;
@@ -106,7 +151,7 @@ class WebRx implements RxPlayer {
 
     final src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.connect(ctx.destination);
+    src.connect(_gainNode ?? ctx.destination);
 
     // ⚠️ Keep a small cushion ahead of the clock. Scheduling into the past makes
     // the browser play the packet immediately, which is exactly the click this
@@ -130,6 +175,7 @@ class WebRx implements RxPlayer {
     _sock = null;
     _ctx?.close();
     _ctx = null;
+    _gainNode = null;
     status = 'stopped';
     level = 0;
     packets = 0;

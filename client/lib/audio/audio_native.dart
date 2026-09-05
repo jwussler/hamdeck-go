@@ -29,6 +29,7 @@ class _NativeRx implements RxPlayer {
   WebSocketChannel? _ch;
   StreamSubscription? _sub;
   AudioSource? _src;
+  SoundHandle? _handle;
   bool _setup = false;
   int _rate = 22050;
 
@@ -40,6 +41,70 @@ class _NativeRx implements RxPlayer {
   String status = 'off';
   @override
   bool get playing => _setup && _ch != null;
+
+  int _volume = 100;
+  String? _wantDevice;
+  bool _keyed = false;
+
+  @override
+  set keyed(bool on) {
+    _keyed = on;
+    final h = _handle;
+    if (h != null) {
+      try {
+        _engine.setVolume(h, on ? 0 : _volume / 100.0);
+      } catch (_) {}
+    }
+    if (!on) level = 0;
+  }
+
+  @override
+  int get volume => _volume;
+
+  @override
+  set volume(int percent) {
+    _volume = percent.clamp(0, 150);
+    final src = _src;
+    if (src != null) {
+      // SoLoud takes a linear gain; 100% is unity.
+      final h = _handle;
+      if (h != null) {
+        try {
+          _engine.setVolume(h, _volume / 100.0);
+        } catch (_) {}
+      }
+    }
+  }
+
+  @override
+  Future<List<OutDevice>> outputs() async {
+    try {
+      return [
+        for (final d in _engine.listPlaybackDevices())
+          OutDevice(d.name, d.name + (d.isDefault ? '  (default)' : '')),
+      ];
+    } catch (e) {
+      // ⚠️ An empty list is a real answer - a machine can have one device - so it
+      // must not be confused with a failure to ask.
+      status = 'could not list speakers: $e';
+      return const [];
+    }
+  }
+
+  @override
+  Future<void> useOutput(String? name) async {
+    _wantDevice = name;
+    if (!_engine.isInitialized) return;
+    try {
+      final devices = _engine.listPlaybackDevices();
+      final match = name == null || name.isEmpty
+          ? null
+          : devices.where((d) => d.name == name).firstOrNull;
+      await _engine.changeDevice(newDevice: match);
+    } catch (e) {
+      status = 'could not switch speaker: $e';
+    }
+  }
 
   DateTime _levelAt = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -81,15 +146,21 @@ class _NativeRx implements RxPlayer {
         final src = _engine.setBufferStream(
           maxBufferSizeDuration: const Duration(seconds: 10),
           bufferingType: BufferingType.released,
-          // Enough to ride out a network hiccup, little enough that answering
-          // someone does not arrive late.
-          bufferingTimeNeeds: 0.3,
+          // ⚠️ 150 ms, not 300. Every millisecond here is added to the host's
+          // own 371 ms chunk, and the total is how late the operator hears the
+          // person they are about to answer. Enough to ride out a hiccup on a
+          // LAN; a link that needs more than this needs to say so rather than
+          // be padded for silently.
+          bufferingTimeNeeds: 0.15,
           sampleRate: _rate,
           channels: channels,
           format: BufferType.s16le,
         );
         _src = src;
-        _engine.play(src);
+        _handle = _engine.play(src, volume: _volume / 100.0);
+        if (_wantDevice != null && _wantDevice!.isNotEmpty) {
+          await useOutput(_wantDevice);
+        }
         _setup = true;
         status = 'playing';
       } catch (e) {
@@ -101,6 +172,13 @@ class _NativeRx implements RxPlayer {
     }
     final src = _src;
     if (!_setup || src == null || msg is! List<int>) return;
+    // ⚠️ DROPPED, NOT QUEUED. See RxPlayer.keyed: queueing an over's worth of
+    // receive audio means hearing it played back on unkey, and every
+    // transmission adds to the lag for the rest of the session.
+    if (_keyed) {
+      packets++;
+      return;
+    }
     final bytes = msg is Uint8List ? msg : Uint8List.fromList(msg);
     final view = ByteData.sublistView(bytes);
     var peak = 0;
@@ -150,6 +228,34 @@ class _NativeTx implements TxCapture {
   @override
   MicDevice? device;
 
+  int _gain = 100;
+
+  @override
+  int get gain => _gain;
+
+  @override
+  set gain(int percent) => _gain = percent.clamp(0, 300);
+
+  /// Apply the gain to one packet of s16le.
+  ///
+  /// ⚠️ CLIPPED, NOT WRAPPED. Sixteen-bit samples that overflow wrap from a loud
+  /// peak to a loud peak of the OPPOSITE sign, which is not distortion, it is a
+  /// buzz - and on an SSB transmitter it is a splatter complaint from three
+  /// channels away.
+  Uint8List _applyGain(Uint8List pcm) {
+    if (_gain == 100) return pcm;
+    final out = Uint8List.fromList(pcm);
+    final view = ByteData.sublistView(out);
+    final g = _gain / 100.0;
+    for (var i = 0; i + 1 < out.lengthInBytes; i += 2) {
+      var v = (view.getInt16(i, Endian.little) * g).round();
+      if (v > 32767) v = 32767;
+      if (v < -32768) v = -32768;
+      view.setInt16(i, v, Endian.little);
+    }
+    return out;
+  }
+
   StreamSubscription? _mon;
 
   @override
@@ -177,7 +283,8 @@ class _NativeTx implements TxCapture {
         autoGain: false,
       ));
       status = 'listening to the microphone (nothing is being sent)';
-      _mon = stream.listen((chunk) {
+      _mon = stream.listen((raw) {
+        final chunk = _applyGain(raw);
         final view = ByteData.sublistView(chunk);
         var peak = 0;
         for (var i = 0; i + 1 < chunk.lengthInBytes; i += 2) {
@@ -288,7 +395,10 @@ class _NativeTx implements TxCapture {
     status = chosen == null
         ? 'transmitting from the system default microphone'
         : 'transmitting from ${chosen.label}';
-    _mic = stream.listen((chunk) {
+    _mic = stream.listen((raw) {
+      // ⚠️ Gain FIRST, then meter: the level the operator is shown has to be the
+      // level that reached the radio, not the one before the knob.
+      final chunk = _applyGain(raw);
       final view = ByteData.sublistView(chunk);
       var peak = 0;
       for (var i = 0; i + 1 < chunk.lengthInBytes; i += 2) {
