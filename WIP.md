@@ -7,7 +7,7 @@ checklist this was built from.
 
 - **Station host**: VM 105 (`192.168.40.64`), `systemd` unit `hamdeck-go`,
   installed at `/opt/hamdeck-go`, credential in `/etc/hamdeck-go/env` (mode 600),
-  recordings in `/var/lib/hamdeck-go/recordings`. Version **0.4.2**.
+  recordings in `/var/lib/hamdeck-go/recordings`. Version **0.5.0**.
   ENABLED, so it comes back after a reboot.
 - **Panel**: served by the host itself at `/` from `/opt/hamdeck-go/panel`.
   The previous build is kept beside it as `panel.old` — swap the two
@@ -17,7 +17,7 @@ checklist this was built from.
 - **Tuner**: TG-XL at `192.168.40.51:9010`. **CAT proxy**: 127.0.0.1:4532.
 - **The address**: **`https://radio.wa0o.com`** — the station's only URL. Caddy
   on .60 proxies it to 192.168.40.64:5102 with the real wildcard cert. LAN/VPN
-  only, no tunnel. Login `admin` / `gotest`.
+  only, no tunnel. Login: the account in `/etc/hamdeck-go/users.json`.
 
 ⚠️ **ONE NAME. Moving the station means editing that `reverse_proxy` line, never
 adding a hostname.** `radio.wa0o.com` had been left pointing at the stopped C++
@@ -39,13 +39,13 @@ so a reinstall from the .deb would have silently removed the CAT proxy.
 
 ## The gates — run these, do not reason about them
 
-    tools/check_auth.py https://radio.wa0o.com admin gotest
+    HAMDECK_PASSWORD=... tools/check_auth.py https://radio.wa0o.com <user>
         every route needs a session except health and the login pair.
         The route list comes from the HOST, so a route added tomorrow is
         checked tomorrow. Safe against the station: every call is made
         WITHOUT a session, so a working route does nothing and answers 401.
 
-    tools/parity.py https://radio.wa0o.com admin gotest
+    HAMDECK_PASSWORD=... tools/parity.py https://radio.wa0o.com <user>
         every C++ route has a Go route. READ-ONLY by default.
 
     tools/check_audio_roundtrip.sh client/build/linux/x64/release/bundle/hamdeck_panel
@@ -73,6 +73,32 @@ rebuilt one carried the *same* id, so comparing it "proved" the station was up
 to date when it was four hours behind. Grep the built `main.dart.js` for a
 string only the new code has — that check can tell working from broken.
 
+## Accounts — the way back in
+
+    hamdeck-host users set <name>       create, or reset a password
+    hamdeck-host users list | remove | grant <name> tx | revoke <name> tx
+
+⚠️ **`/etc/hamdeck-go/users.json` is the only place an account exists.** No
+username in the source, no hash in an environment variable — `HAMDECK_ADMIN_HASH`
+and `--hash-password` are deleted, not deprecated, and `/etc/hamdeck-go/env` is
+shredded. This was a rewrite of `internal/auth`, not a patch: three mechanisms
+that had to agree were about to become four.
+
+⚠️ **A reset reaches the RUNNING host within about three seconds** — the file's
+mtime is watched — so recovering a login never means restarting the station and
+dropping CAT, the receiver and anything on the air.
+
+⚠️ **`sudo hamdeck-host users set` keeps the file's existing owner.** The service
+runs as `ubuntu`; a fresh `root:root 0600` file would leave the host unable to
+read its own accounts at the next restart — a password reset that takes the
+station down, found hours later. Proved on this box: the file stays `ubuntu:root
+0600` and the service user can read it.
+
+⚠️ **The password is never an argument** — not to the CLI, and no longer to
+`tools/check_auth.py` or `tools/parity.py`, which take `HAMDECK_PASSWORD` from
+the environment or prompt. An argument is in the shell history and visible in
+`ps` to everyone on the box.
+
 ## Done 09/04/2026 evening
 
 - **The panel the station serves is the panel in git.** It had been four hours
@@ -91,12 +117,11 @@ string only the new code has — that check can tell working from broken.
   stops.
 - **README and `serial.go`** no longer describe a read-only experiment that
   never opens a serial port. It runs the station; the C++ host is stopped.
-- **Packages rebuilt at 0.4.2**, the stale 0.2.0 pair deleted. Payload checked:
+- **Packages rebuilt at 0.5.0**, the stale 0.2.0 pair deleted. Payload checked:
   the keyboard work and both audio plugins are inside the panel .deb.
 
 ## What is not done
 
-- Users added through the admin routes live in memory only.
 - Installers are unsigned: SmartScreen warns on Windows, and the DMG needs
   right-click → Open on macOS. **The biggest adoption blocker left.**
 - Receive latency is 371 ms.

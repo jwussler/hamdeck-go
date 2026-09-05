@@ -22,6 +22,7 @@ Usage: tools/check_auth.py <base-url> [user password]
        session, so "everything is 401" cannot be mistaken for a pass.
 """
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -57,9 +58,27 @@ def get(url):
         return 0, str(e)
 
 
+# ⚠️ THE PASSWORD MAY COME FROM THE ENVIRONMENT, AND THAT IS THE POINT. An
+# argument is in the shell history and visible in `ps` to every user on the box -
+# the host's own CLI refuses a password flag for that reason, and a checker that
+# demands one hands the problem straight back. Set HAMDECK_PASSWORD, or pass "-"
+# to read it from stdin.
+def resolve_password(arg):
+    import getpass
+    if arg == "-":
+        return sys.stdin.readline().rstrip("\n")
+    if arg:
+        return arg
+    env = os.environ.get("HAMDECK_PASSWORD")
+    if env:
+        return env
+    return getpass.getpass("password: ")
+
+
 def main():
     base = sys.argv[1].rstrip("/")
-    user, password = (sys.argv[2], sys.argv[3]) if len(sys.argv) > 3 else (None, None)
+    user = sys.argv[2] if len(sys.argv) > 2 else None
+    password = resolve_password(sys.argv[3] if len(sys.argv) > 3 else "") if user else None
 
     token = None
     if user:

@@ -17,6 +17,7 @@ Usage: tools/parity.py <base-url> <user> <password> [--cpp <path to hamdeck-cpp>
 import argparse
 import json
 import re
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -72,11 +73,28 @@ def call(base, path, token):
         return 0, {"message": str(e)}
 
 
+# ⚠️ THE PASSWORD MAY COME FROM THE ENVIRONMENT, AND THAT IS THE POINT. An
+# argument is in the shell history and visible in `ps` to every user on the box -
+# the host's own CLI refuses a password flag for that reason, and a checker that
+# demands one hands the problem straight back. Set HAMDECK_PASSWORD, or pass "-"
+# to read it from stdin.
+def resolve_password(arg):
+    import getpass
+    if arg == "-":
+        return sys.stdin.readline().rstrip("\n")
+    if arg:
+        return arg
+    env = os.environ.get("HAMDECK_PASSWORD")
+    if env:
+        return env
+    return getpass.getpass("password: ")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("base")
     ap.add_argument("user")
-    ap.add_argument("password")
+    ap.add_argument("password", nargs="?", default="")
     ap.add_argument("--cpp", default="/home/ubuntu/hamdeck-cpp")
     ap.add_argument("--go", default="/home/ubuntu/hamdeck-go")
     ap.add_argument("--allow-control", action="store_true",
@@ -101,7 +119,7 @@ def main():
 
     req = urllib.request.Request(
         f"{a.base}/api/auth/login",
-        data=json.dumps({"username": a.user, "password": a.password}).encode(),
+        data=json.dumps({"username": a.user, "password": resolve_password(a.password)}).encode(),
         headers={"Content-Type": "application/json"})
     token = json.loads(urllib.request.urlopen(req, timeout=6).read())["token"]
 
