@@ -132,11 +132,33 @@ jobs:
           $ver = "${{ github.ref_name }}" -replace '^v',''
           if ($ver -notmatch '^\d+\.\d+\.\d+') { $ver = "0.0.0" }
           $src = "${{ github.workspace }}\client\build\windows\x64\runner\Release"
+          # ⚠️ THE MICROSOFT C++ RUNTIME SHIPS WITH THE APP, and this is not
+          # optional. A Flutter Windows app needs VCRUNTIME140, VCRUNTIME140_1
+          # and MSVCP140; a clean Windows 11 does not have them, so the app
+          # fails to start with 0xC0000135 and Windows says nothing an operator
+          # can act on. It worked on the developer's own machine because some
+          # other program had already installed the runtime - which is exactly
+          # how this reaches everybody else broken. Found on a fresh VM, not by
+          # reading code.
+          #
+          # App-local deployment is Microsoft's own sanctioned option and it
+          # keeps the installer a per-user one with no elevation prompt.
+          $vc = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse `
+                  -Filter "vcruntime140.dll" -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match "x64" } |
+                Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $vc) { throw "no Visual C++ runtime found on the runner to ship with the app" }
+          foreach ($d in @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) {
+            $from = Join-Path $vc.DirectoryName $d
+            if (-not (Test-Path $from)) { throw "the runner has no $d beside $($vc.FullName)" }
+            Copy-Item $from (Join-Path $src $d) -Force
+          }
           # ⚠️ CHECK THE PAYLOAD BEFORE PACKAGING IT. Without the two native
           # audio plugins the panel installs, starts, connects and is silent in
           # both directions - which is far worse than failing to start, because
-          # it looks like a radio problem.
-          foreach ($f in @("hamdeck_panel.exe","flutter_soloud_plugin.dll","record_windows_plugin.dll","hotkey_manager_windows_plugin.dll","tray_manager_plugin.dll","window_manager_plugin.dll","screen_retriever_windows_plugin.dll")) {
+          # it looks like a radio problem. And without the runtime it does not
+          # start at all on a machine that has never had Visual Studio near it.
+          foreach ($f in @("hamdeck_panel.exe","flutter_soloud_plugin.dll","record_windows_plugin.dll","hotkey_manager_windows_plugin.dll","tray_manager_plugin.dll","window_manager_plugin.dll","screen_retriever_windows_plugin.dll","vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) {
             if (-not (Test-Path "$src\$f")) { throw "the staged panel has no $f" }
           }
           & iscc.exe /Qp "/DAppVersion=$ver" "/DSourceDir=$src" hamdeck-panel.iss

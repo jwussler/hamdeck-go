@@ -16,10 +16,15 @@
 # Needs: VM 109 up, OpenSSH answering as the local account (see win_provision).
 set -uo pipefail
 
-VM_HOST="${WIN_TEST_HOST:-192.168.40.171}"
+VM_HOST="${WIN_TEST_HOST:-192.168.40.168}"
 VM_USER="${WIN_TEST_USER:-jwussler}"
 EXE="${1:?usage: win_test.sh <installer .exe>}"
-SSH="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $VM_USER@$VM_HOST"
+# ⚠️ -i, and the shell on the far end is cmd. Setting PowerShell as the SSH
+# DefaultShell breaks scp outright - "Connection closed", nothing else - because
+# file transfer runs through that shell. Every command below therefore invokes
+# powershell explicitly rather than relying on what the login shell happens to be.
+KEY="${WIN_TEST_KEY:-$HOME/.ssh/vm_admin}"
+SSH="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $VM_USER@$VM_HOST"
 OUT="${2:-/tmp/win-test}"
 mkdir -p "$OUT"
 
@@ -28,7 +33,8 @@ ok()   { echo "  ok    $1"; }
 FAILED=0
 
 echo "== copy the installer"
-scp -q "$EXE" "$VM_USER@$VM_HOST:C:/Users/$VM_USER/Setup.exe" || { fail "copy"; exit 1; }
+scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new "$EXE" \
+    "$VM_USER@$VM_HOST:C:/Users/$VM_USER/Setup.exe" || { fail "copy"; exit 1; }
 ok "copied $(basename "$EXE")"
 
 echo "== install it the way an operator would, but silently"
@@ -37,29 +43,68 @@ echo "== install it the way an operator would, but silently"
 $SSH 'powershell -NoProfile -Command "Start-Process -Wait -FilePath C:\Users\'"$VM_USER"'\Setup.exe -ArgumentList \"/VERYSILENT\",\"/SUPPRESSMSGBOXES\",\"/NORESTART\"; exit 0"' \
     && ok "installer returned" || fail "installer did not return cleanly"
 
-echo "== is it actually on disk where the operator will look for it"
-$SSH 'powershell -NoProfile -Command "if (Test-Path \"$env:LOCALAPPDATA\Programs\HamDeck Panel\hamdeck_panel.exe\") { exit 0 } elseif (Test-Path \"C:\Program Files\HamDeck Panel\hamdeck_panel.exe\") { exit 0 } else { exit 1 }"' \
-    && ok "the executable is installed" || fail "installed, but the .exe is not where it should be"
-
-echo "== start it, and see whether it is still alive thirty seconds later"
-# ⚠️ THIRTY SECONDS, not one. A Flutter app that throws on its first frame exits
-# a moment after starting, and a check that looks immediately calls that a pass.
+echo "== the Microsoft C++ runtime, which a clean Windows does not have"
+# ⚠️ THIS CHECK EXISTS BECAUSE THE APP SHIPPED WITHOUT IT. A Flutter Windows app
+# needs VCRUNTIME140, VCRUNTIME140_1 and MSVCP140. The developer's machine had
+# them from some other program, so it ran there and failed for everybody with a
+# clean install - 0xC0000135, and nothing on screen. Either the system has them
+# or the package brings them; both are fine, neither is not.
 $SSH 'powershell -NoProfile -Command "
-  $exe = @(\"$env:LOCALAPPDATA\Programs\HamDeck Panel\hamdeck_panel.exe\",\"C:\Program Files\HamDeck Panel\hamdeck_panel.exe\") | Where-Object { Test-Path $_ } | Select-Object -First 1
-  Start-Process $exe; Start-Sleep -Seconds 30
-  if (Get-Process hamdeck_panel -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"' \
+  $bad = @()
+  foreach ($d in @(\"vcruntime140.dll\",\"vcruntime140_1.dll\",\"msvcp140.dll\")) {
+    $sys = Test-Path (Join-Path $env:SystemRoot (Join-Path System32 $d))
+    $app = Test-Path (Join-Path \"$env:LOCALAPPDATA\HamDeck Panel\" $d)
+    if (-not ($sys -or $app)) { $bad += $d }
+  }
+  if ($bad.Count) { Write-Output (\"missing: \" + ($bad -join \", \")); exit 1 } else { exit 0 }"' \
+    && ok "the C++ runtime is available to the app" \
+    || fail "the app cannot start on a clean machine - no Visual C++ runtime"
+
+echo "== is it actually on disk where the operator will look for it"
+# ⚠️ THE PATH COMES FROM packaging/hamdeck-panel.iss - {localappdata}\HamDeck
+# Panel - not from memory. Guessing it added a "Programs" folder that Inno never
+# creates, and the check then failed against a perfectly good install.
+$SSH 'powershell -NoProfile -Command "if (Test-Path \"$env:LOCALAPPDATA\HamDeck Panel\hamdeck_panel.exe\") { exit 0 } else { exit 1 }"' \
+    && ok "the executable is installed where the .iss puts it" \
+    || fail "installed, but the .exe is not at %LOCALAPPDATA%\HamDeck Panel"
+
+echo "== start it IN THE OPERATOR'S SESSION, and see whether it is alive 30 s later"
+# ⚠️ SESSION 0 IS NOT A DESKTOP. Start-Process over SSH runs the app in the
+# service session, where it has no visible window: the process check passes, the
+# screenshot shows an empty desktop, and the app is "running" in a place no
+# operator will ever see. A scheduled task marked /it runs it in the logged-on
+# session, which is what double-clicking the shortcut does.
+$SSH 'powershell -NoProfile -Command "Get-Process hamdeck_panel -ErrorAction SilentlyContinue | Stop-Process -Force"' >/dev/null 2>&1
+# ⚠️ REGISTERED WITH PowerShell, NOT schtasks. The schtasks command line needs
+# quotes inside quotes inside an ssh argument, and it silently registered a task
+# with an EMPTY Execute - which then failed with 0xC0000135 and looked like a
+# missing DLL in the app rather than a mangled command line.
+$SSH 'powershell -NoProfile -Command "
+  $dir = \"$env:LOCALAPPDATA\HamDeck Panel\"
+  $act = New-ScheduledTaskAction -Execute (Join-Path $dir hamdeck_panel.exe) -WorkingDirectory $dir
+  $pri = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
+  Register-ScheduledTask -TaskName hamdecktest -Action $act -Principal $pri -Force | Out-Null
+  Start-ScheduledTask -TaskName hamdecktest"' >/dev/null 2>&1
+$SSH 'powershell -NoProfile -Command "Start-Sleep -Seconds 30; if (Get-Process hamdeck_panel -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"' \
     && ok "still running after 30 s" || fail "the app died after starting"
 
 echo "== photograph the desktop, because 'running' is not 'drawing'"
-$SSH 'powershell -NoProfile -Command "
-  Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-  $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-  $g = [System.Drawing.Graphics]::FromImage($bmp)
-  $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-  $bmp.Save(\"$env:TEMP\hamdeck-shot.png\")"' >/dev/null 2>&1
-scp -q "$VM_USER@$VM_HOST:C:/Users/$VM_USER/AppData/Local/Temp/hamdeck-shot.png" "$OUT/" 2>/dev/null \
-    && ok "screenshot at $OUT/hamdeck-shot.png" || fail "could not photograph the desktop"
+# ⚠️ THE PICTURE COMES FROM THE HYPERVISOR, NOT FROM INSIDE WINDOWS. An SSH
+# session has no interactive desktop - CopyFromScreen there captures nothing,
+# and the failure reads as "the app drew nothing" when the app is fine. The
+# QEMU console sees the actual framebuffer and needs no cooperation from the
+# guest at all.
+VMID="${WIN_TEST_VMID:-109}"
+PVE="${WIN_TEST_PVE:-pve}"
+ssh "$PVE" "echo 'screendump /tmp/hamdeck-shot.ppm' | qm monitor $VMID" >/dev/null 2>&1
+sleep 2
+ssh "$PVE" "cat /tmp/hamdeck-shot.ppm" > "$OUT/hamdeck-shot.ppm" 2>/dev/null
+if [ -s "$OUT/hamdeck-shot.ppm" ]; then
+    python3 -c "from PIL import Image; Image.open('$OUT/hamdeck-shot.ppm').save('$OUT/hamdeck-shot.png')" 2>/dev/null \
+        && ok "screenshot at $OUT/hamdeck-shot.png" || ok "console frame at $OUT/hamdeck-shot.ppm"
+else
+    fail "could not photograph the console"
+fi
 
 echo
 if [ "$FAILED" -eq 0 ]; then
