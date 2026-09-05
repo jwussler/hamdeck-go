@@ -216,40 +216,30 @@ MENU="100 60 1250 790"
 # ⚠️ AND IT CONFIRMS THE MENU IS ACTUALLY OPEN. The first click on an unfocused
 # window only activates it, so one click opens nothing - and searching a menu
 # that never opened reports "could not select F13" about a panel that is fine.
-open_key_menu() {
-    local i
-    # ⚠️ CLOSE IT FIRST. On a retry the menu is usually still OPEN, and the click
-    # that is meant to open it then lands on whatever row happens to sit at the
-    # dropdown's coordinates - selecting a random key and closing the menu. Every
-    # retry made the next one worse, which is why three attempts failed as
-    # reliably as one.
-    key "esc" 0.6
-    for i in 1 2 3; do
-        bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
-        sleep 1.5
-        bash "$(dirname "$0")/win_find.sh" "no system-wide key" $MENU >/dev/null && return 0
-    done
-    return 1
-}
-
 # choose <regex matching the menu row> <regex the KEY field must then show>
 #
 # ⚠️ THE ROW IS FOUND, NOT CALCULATED. Flutter aligns the SELECTED row with the
 # button and clamps the menu at the screen edge, so a row's absolute position
 # depends on what is already chosen: one run clicked "Pause" while reporting it
-# had chosen F13, and the next missed the menu entirely because the previous
-# session had left F12 selected. Both were green-ish. Read the screen.
+# had chosen F13, and the next missed the menu entirely.
+#
+# ⚠️ AND THERE IS NO SEPARATE "IS THE MENU OPEN?" CHECK ANY MORE. There was one,
+# and it looked for the "Off - no system-wide key" row - which is the FIRST row,
+# and Flutter scrolls it out of view whenever a key further down is selected. So
+# with Pause chosen the check said "not open" about a menu that was open, clicked
+# again, and that second click CLOSED it. The loop oscillated and three tries
+# failed as reliably as one. Finding the target row is itself proof the menu is
+# open; nothing else needs asking.
 choose() {
     local row="$1" want="$2" try xy
     for try in 1 2 3; do
-        open_key_menu || { key "esc" 1; continue; }
-        # ⚠️ SCROLL THE MENU TO THE TOP BEFORE LOOKING. The menu is itself a
-        # scroll view positioned on the SELECTED row, so with Pause chosen the
-        # F13 row was not merely off to one side - it was not rendered at all,
-        # and searching for it reported it missing from a chooser that has it.
-        # Eight Ups is more than the list is long; the highlight stops at the top.
-        # One connection for all eight - a round trip per keystroke made this
-        # loop take minutes. Same reason win_sendtext.sh paces a single session.
+        key "esc" 0.6                       # a retry starts from closed, always
+        bash "$(dirname "$0")/win_click.sh" "click 383,320" >/dev/null 2>&1
+        sleep 1.5
+        # ⚠️ Scroll the menu to the top before looking: it is itself a scroll
+        # view positioned on the selected row, so with Pause chosen the F13 row
+        # was not off to one side, it was not rendered at all. One connection for
+        # all eight - a round trip per keystroke made this take minutes.
         ssh "$PVE" "qm monitor $VMID" >/dev/null 2>&1 <<'UPS'
 sendkey up
 sendkey up
@@ -261,15 +251,10 @@ sendkey up
 sendkey up
 UPS
         sleep 1
-        # While the menu is open it covers the KEY field, so a match in this
-        # region is a menu row and not the field showing the current value.
         if xy=$(WIN_FIND_LAST="${WIN_FIND_LAST:-}" bash "$(dirname "$0")/win_find.sh" "$row" $MENU); then
             bash "$(dirname "$0")/win_click.sh" "click ${xy% *},${xy#* }" >/dev/null 2>&1
             sleep 2
             bash "$(dirname "$0")/win_read.sh" $KEY_FIELD | grep -qE "$want" && return 0
-        else
-            # Menu did not open, or opened somewhere unexpected. Close it and retry.
-            key "esc" 1
         fi
     done
     return 1
