@@ -113,6 +113,15 @@ $SSH 'powershell -NoProfile -Command "if (Test-Path \"$env:LOCALAPPDATA\HamDeck 
     && ok "the executable is installed where the .iss puts it" \
     || fail "installed, but the .exe is not at %LOCALAPPDATA%\HamDeck Panel"
 
+echo "== is anybody logged in? a windowed app has nowhere to go otherwise"
+# ⚠️ NO SESSION, NO APP - AND SAY SO. After a Windows Update reboot this box came
+# back to the lock screen, the interactive task had nowhere to run, and the test
+# reported "the app died after starting". That sent the search at the build when
+# the build was fine. A missing desktop is its own finding.
+$SSH 'powershell -NoProfile -Command "if ((query session 2>$null | Select-String \"Active\").Count -gt 0) { exit 0 } else { exit 1 }"' \
+    && ok "an interactive session is present" \
+    || fail "nobody is logged in - no desktop for a windowed app (autologon off, or it is sitting at the lock screen)"
+
 echo "== start it IN THE OPERATOR'S SESSION, and see whether it is alive 30 s later"
 # ⚠️ SESSION 0 IS NOT A DESKTOP. Start-Process over SSH runs the app in the
 # service session, where it has no visible window: the process check passes, the

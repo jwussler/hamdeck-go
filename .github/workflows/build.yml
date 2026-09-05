@@ -134,36 +134,29 @@ jobs:
           $src = "${{ github.workspace }}\client\build\windows\x64\runner\Release"
           # ⚠️ THE MSVC RUNTIME DLLS SHIP WITH THE APP, and this is not
           # optional. These are Microsoft's Visual C++ redistributable files -
-          # VCRUNTIME140, VCRUNTIME140_1, MSVCP140 - needed by every native
-          # Windows binary, including this one, because Flutter compiles to
-          # native code. ⚠️ They have nothing to do with the C++ HOST in the
-          # sibling repo, which is our own code and only a reference for this
-          # port; the shared "C++" is Microsoft's compiler, not our program. a clean Windows 11 does not have them, so the app
-          # fails to start with 0xC0000135 and Windows says nothing an operator
-          # can act on. It worked on the developer's own machine because some
-          # other program had already installed the runtime - which is exactly
-          # how this reaches everybody else broken. Found on a fresh VM, not by
-          # reading code.
+          # needed by every native Windows binary, including this one, because
+          # Flutter compiles to native code. ⚠️ Nothing to do with the C++ HOST
+          # in the sibling repo, which is our own code and only a reference for
+          # this port; the shared "C++" is Microsoft's compiler, not our program.
           #
-          # App-local deployment is Microsoft's own sanctioned option and it
-          # keeps the installer a per-user one with no elevation prompt.
-          # ⚠️ THE FOLDER MUST HAVE ALL THREE. The first attempt took the first
-          # vcruntime140.dll it found anywhere under Visual Studio and landed in
-          # the COMPILER's host-tools directory (bin\Hostx86\x64), which ships
-          # vcruntime140.dll and no vcruntime140_1.dll - so the build failed on
-          # the second file with a path that looked perfectly plausible. The
-          # redistributable lives under VC\Redist\MSVC\<ver>\x64\...CRT, and
-          # the honest test is not the name of the folder but whether all three
-          # files are in it.
+          # ⚠️ THE WHOLE FOLDER, NOT THREE FILES. Shipping vcruntime140,
+          # vcruntime140_1 and msvcp140 was still not enough: the app died with
+          # 0xC0000135 on a clean Windows 11 until the full redistributable went
+          # on, because the plugins pull in more of the CRT than the three names
+          # everybody quotes - msvcp140_1 among them. Guessing the list is how
+          # this stayed broken through two builds; copying what Microsoft ships
+          # is not.
           $need = @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")
           $vcDir = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Directory `
                      -Filter "*CRT" -ErrorAction SilentlyContinue |
                    Where-Object { $_.FullName -match "\\Redist\\" -and $_.FullName -match "\\x64\\" } |
                    Where-Object { $dir = $_.FullName; ($need | Where-Object { Test-Path (Join-Path $dir $_) }).Count -eq 3 } |
                    Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $vcDir) { throw "no folder on this runner holds all three C++ runtime DLLs" }
-          Write-Host "shipping the C++ runtime from $($vcDir.FullName)"
-          foreach ($d in $need) { Copy-Item (Join-Path $vcDir.FullName $d) (Join-Path $src $d) -Force }
+          if (-not $vcDir) { throw "no folder on this runner holds the C++ runtime redistributable" }
+          Write-Host "shipping the MSVC runtime from $($vcDir.FullName)"
+          Copy-Item (Join-Path $vcDir.FullName "*.dll") $src -Force
+          Get-ChildItem $src -Filter "*140*.dll" | ForEach-Object { Write-Host "  bundled $($_.Name)" }
+
           # ⚠️ CHECK THE PAYLOAD BEFORE PACKAGING IT. Without the two native
           # audio plugins the panel installs, starts, connects and is silent in
           # both directions - which is far worse than failing to start, because
