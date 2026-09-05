@@ -56,12 +56,16 @@ for directive in ("SetupIconFile", "WizardSmallImageFile"):
         problems.append(f"installer: {directive} points at a missing file: {m.group(1).strip()}")
 
 # macOS
+# ⚠️ COMPARED AGAINST A COPY IN THIS REPO, not against ~/hamdeck-site/brand. It
+# was the latter, which does not exist on a CI runner - so the macOS half of this
+# gate silently did nothing there, which is the failure mode this whole file
+# exists to stop. A check that skips is not a check.
 for s in (16, 32, 64, 128, 256, 512, 1024):
     same(
         ROOT / f"client/macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_{s}.png",
-        Path("/home/ubuntu/hamdeck-site/brand") / f"mac-{s}.png",
+        BRAND / "mac" / f"{s}.png",
         f"macOS app icon {s}px",
-    ) if (Path("/home/ubuntu/hamdeck-site/brand") / f"mac-{s}.png").exists() else None
+    )
 
 # Linux: the .desktop names an icon, so an icon file has to be installed.
 deb = (ROOT / "packaging/build-deb.sh").read_text()
