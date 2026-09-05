@@ -9,6 +9,7 @@
 # the menu entirely. Read the screen, click what is actually there.
 #
 #   win_find.sh <regex>  [x1 y1 x2 y2]     prints the centre of the first match
+#   WIN_FIND_LAST=1 win_find.sh ...         prints the centre of the LAST match
 # Exits 1 and prints nothing when the text is not on screen.
 set -euo pipefail
 VMID="${WIN_TEST_VMID:-109}"
@@ -21,7 +22,7 @@ ssh "$PVE" "echo 'screendump /tmp/find.ppm' | qm monitor $VMID" >/dev/null 2>&1
 sleep 1
 ssh "$PVE" "cat /tmp/find.ppm" > "$TMP/s.ppm" 2>/dev/null
 python3 - "$TMP" "$PAT" "$X1" "$Y1" "$X2" "$Y2" <<'PY'
-import re, subprocess, sys
+import os, re, subprocess, sys
 from PIL import Image
 tmp, pat = sys.argv[1], sys.argv[2]
 x1, y1, x2, y2 = map(int, sys.argv[3:7])
@@ -44,11 +45,16 @@ for r in rows:
     e["l"] = min(e["l"], L); e["t"] = min(e["t"], T)
     e["r"] = max(e["r"], L + W); e["b"] = max(e["b"], T + H)
 rx = re.compile(pat, re.I)
-for e in sorted(lines.values(), key=lambda e: e["t"]):
-    if rx.search(" ".join(e["text"])):
-        cx = x1 + ((e["l"] + e["r"]) / 2) / S
-        cy = y1 + ((e["t"] + e["b"]) / 2) / S
-        print(f"{int(cx)} {int(cy)}")
-        sys.exit(0)
-sys.exit(1)
+hits = [e for e in sorted(lines.values(), key=lambda e: e["t"])
+        if rx.search(" ".join(e["text"]))]
+if not hits:
+    sys.exit(1)
+# ⚠️ Sometimes the row wanted is the LAST match, not the first - F9 and F12 carry
+# the same warning text and only their position tells them apart, and OCR reads
+# the digits badly enough ("F1i4" for F14) that matching on the number is not
+# safe. Anchor on wording that is unique, and use position for the rest.
+e = hits[-1] if os.environ.get("WIN_FIND_LAST") else hits[0]
+cx = x1 + ((e["l"] + e["r"]) / 2) / S
+cy = y1 + ((e["t"] + e["b"]) / 2) / S
+print(f"{int(cx)} {int(cy)}")
 PY

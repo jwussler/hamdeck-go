@@ -114,14 +114,25 @@ click_at() { # click_at <y>  - twice, because the first click only activates
     sleep 0.8
 }
 
-fill() { # fill <y> <text> <regex it must then read> - retries
-    local y="$1" text="$2" want="$3" try got
+fill() { # fill <y> <text> <regex it must then read, or "-" to count ink>
+    local y="$1" text="$2" want="$3" try got ink
     for try in 1 2 3; do
         click_at "$y"
         key "ctrl-a" 0.4; key "delete" 0.6
         bash "$(dirname "$0")/win_sendtext.sh" "$VMID" "$text"
         sleep 1
-        [ -z "$want" ] && return 0          # a password cannot be read back
+        if [ "$want" = "-" ]; then
+            # ⚠️ A PASSWORD IS DOTS, SO COUNT THE INK. An empty box looks exactly
+            # like a full one to OCR, and a box that silently never got typed into
+            # read as success while the run blamed the panel for "still being on
+            # the login screen". Measured on this panel: empty ~22 pixels of ink,
+            # eight characters ~377. (An earlier note said 763 - that was
+            # SIXTEEN characters, because the box had not been cleared first.
+            # Baseline against a known state or the number means nothing.)
+            ink=$(bash "$(dirname "$0")/win_ink.sh" 480 $((y - 12)) 820 $((y + 12)))
+            [ "${ink:-0}" -gt 120 ] && return 0
+            continue
+        fi
         got=$(bash "$(dirname "$0")/win_read.sh" 460 $((y - 26)) 850 $((y + 22)))
         case "$got" in
             *$want*) return 0 ;;
@@ -136,9 +147,17 @@ fill "$STATION_Y" "http://$SHACK:$PORT" "$SHACK" \
 fill "$USER_Y" "drive" "drive" \
     && ok "the username went into the USERNAME box" \
     || fail "could not type the username"
-# ⚠️ The password is dots; there is nothing to read back. Its proof is the panel
-# leaving the login screen, checked next.
-fill "$PASS_Y" "windrive" ""
+# ⚠️ NOT A VERDICT - A RETRY TRIGGER. This drives fill() to type again when the
+# box looks empty, but it does NOT fail the run: a pass where the ink read low
+# and the login then worked perfectly proved the measurement is less reliable
+# than the thing it was standing in for. The gate is whether the panel connects,
+# checked next, and that one is unambiguous.
+if fill "$PASS_Y" "windrive" "-"; then
+    ok "the password box has something in it"
+else
+    echo "     note: the password box still looks empty after 3 tries - if the"
+    echo "     connection check below passes, this measurement is what is wrong"
+fi
 shot "02-login-typed"
 key "ret" 10
 shot "03-operate"
@@ -226,7 +245,7 @@ UPS
         sleep 1
         # While the menu is open it covers the KEY field, so a match in this
         # region is a menu row and not the field showing the current value.
-        if xy=$(bash "$(dirname "$0")/win_find.sh" "$row" $MENU); then
+        if xy=$(WIN_FIND_LAST="${WIN_FIND_LAST:-}" bash "$(dirname "$0")/win_find.sh" "$row" $MENU); then
             bash "$(dirname "$0")/win_click.sh" "click ${xy% *},${xy#* }" >/dev/null 2>&1
             sleep 2
             bash "$(dirname "$0")/win_read.sh" $KEY_FIELD | grep -qE "$want" && return 0
@@ -238,7 +257,7 @@ UPS
     return 1
 }
 
-if choose "F13.*nothing else" "F13"; then
+if choose "footswitch" "F13"; then
     ok "F13 is the selected key, read back off the screen"
     ALIVE=$($SSH 'powershell -NoProfile -Command "(Get-Process hamdeck_panel -ErrorAction SilentlyContinue | Measure-Object).Count"' 2>/dev/null | tr -dc '0-9')
     [ "${ALIVE:-0}" = "1" ] && ok "the panel survived being given F13" \
@@ -263,7 +282,7 @@ echo "== press the key AT THE KEYBOARD, the way a footswitch would"
 # The polling path does not vary by key - same watcher, same table, only the
 # virtual-key constant differs - so pressing a key the emulated keyboard CAN
 # deliver proves the mechanism. F13 stays the crash test above.
-choose "F12.*commonly bound" "F12" && ok "switched to F12, which this keyboard can actually send" \
+WIN_FIND_LAST=1 choose "commonly bound" "F12" && ok "switched to F12, which this keyboard can actually send" \
     || fail "could not select F12 - the press below proves nothing"
 BEFORE=$(wc -l < /tmp/windrive-host.log)
 key "f12" 2; key "f12" 2; key "f12" 2

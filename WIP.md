@@ -121,6 +121,29 @@ other reason. Not chased: no Mac here, and it is cosmetic. ⚠️ PIL reported o
 representations where the real table of contents has four - parse the icns, do not trust
 `Image.info['sizes']`.
 
+### ⚠️ The harness was lying, four different ways
+None of these were the application. Each one sent me into the app first.
+
+1. **Every click replayed the PREVIOUS call's coordinates.** `win_click.sh` wrote
+   its action list to a file on the VM through `... | ssh 'powershell "$input |
+   Set-Content"'` and **the write silently did not happen** - the old file stayed,
+   the task read it, and the click landed where the last call had aimed while
+   printing `done`. Proven by asking for two different clicks and watching both
+   report `clicked 383,320`. Actions are a task ARGUMENT now and carry a **nonce**
+   that the result must echo back, so a stale answer cannot look like a fresh one.
+2. **"The host saw a login" counted login ATTEMPTS** - the host logs
+   `POST /api/auth/login` for a refused password too. Now asserts the panel left
+   the login screen.
+3. **preflight's boundary host was pinned to a port `win_drive.sh` uses**, so the
+   two together made a security check report 401 for a non-security reason. Free
+   port now, and it asserts the host answering is the one it started.
+4. **`qm sendkey f13` is accepted and delivers nothing.** A probe inside Windows
+   saw F12 (VK 0x7B) every time and F13 (VK 0x7C) never. That test could not pass
+   however correct the app was.
+
+⚠️ Also: **OCR reads this UI's digits badly** (`F1i4` for F14), so rows are matched
+on wording that is unique - "footswitch" is only on the F13 row - not on numbers.
+
 ## Next
 1. Rebuild, reinstall on the `clean` snapshot, run `tools/win_drive.sh` — prove
    F13 assigns without crashing and that a press keys the rig.
