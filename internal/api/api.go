@@ -54,6 +54,9 @@ type Server struct {
 	// Settings the host remembers on the panel's behalf; see hostflags.go.
 	Flags *hostFlags
 
+	// Every pattern Handler() registered, for the policy test.
+	routes []string
+
 	// The antenna tuner, or nil when the host has none.
 	Tuner interface {
 		Configured() bool
@@ -238,10 +241,18 @@ func (s *Server) authed(r *http.Request) bool {
 	return s.Auth.Valid(r.URL.Query().Get("token"))
 }
 
+// Routes is every pattern this server registered, available after Handler().
+func (s *Server) Routes() []string { return append([]string(nil), s.routes...) }
+
 func (s *Server) Handler() http.Handler {
 	real := http.NewServeMux()
 	var registered []string
 	mux := routeMux{mux: real, paths: &registered, s: s}
+	// ⚠️ Kept on the Server so a TEST can ask what was actually registered.
+	// A test carrying its own copy of the route list would pass while the server
+	// served something else entirely - which is the failure tools/parity.py was
+	// written for after a checklist and the behaviour disagreed in silence.
+	defer func() { s.routes = append([]string(nil), registered...) }()
 
 	// Health takes no session on purpose: it is how you ask "is the host up"
 	// without holding a credential, and it says nothing about the band.
