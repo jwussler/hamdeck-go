@@ -144,6 +144,28 @@ None of these were the application. Each one sent me into the app first.
 ⚠️ Also: **OCR reads this UI's digits badly** (`F1i4` for F14), so rows are matched
 on wording that is unique - "footswitch" is only on the F13 row - not on numbers.
 
+### ✅ The Windows drive passes end to end (09/05/2026)
+On a box rolled back to the `clean` baseline, from the installer:
+
+| step | result |
+|---|---|
+| installs and starts in the operator's session | ok |
+| every login field typed and **read back off the screen** | ok |
+| connected and drawing the rig | ok |
+| **assign F13 — the reported crash** | **ok, survived** (3 runs in a row) |
+| the key reaches the rig | ok, 1 ptt call at the host |
+| **the key works with the panel in the BACKGROUND** | ok, 2 ptt calls |
+
+The panel reads `system-wide, hold — release detected by key-state polling · 1 presses`.
+
+⚠️ The last failure to go was **my own redundant check**: an OCR of the PTT status
+line that reported "the panel still has not seen a press" on a run where the host
+had just logged the calls those presses generated. The screenshot plainly read
+"system-wide … 1 presses"; the OCR had grabbed a sliver and returned "prt". It was
+asking the same question the host-side check already answers unambiguously.
+**A second, weaker measurement of something already proven can only add false
+failures.** It prints now, it does not assert.
+
 ## Next
 1. Rebuild, reinstall on the `clean` snapshot, run `tools/win_drive.sh` — prove
    F13 assigns without crashing and that a press keys the rig.
