@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"github.com/jwussler/hamdeck-go/internal/rig"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,14 +19,6 @@ import (
 // ⚠️ EVERY ROUTE HERE CHANGES THE RADIO. Reads are safe; these are not. The C++
 // project's own rule - never probe a live rig with a control route - is about
 // this file.
-
-// catRig is what the table needs from a radio: raw verbs and raw queries.
-// Anything that cannot do both simply does not get these routes, rather than
-// getting versions of them that quietly do nothing.
-type catRig interface {
-	Send(string) error
-	Ask(string) (string, error)
-}
 
 // The rig's power caps, from the C++ host.
 //
@@ -88,7 +81,7 @@ func clampInt(v, lo, hi int) int {
 // read does not come back in the shape expected, this REFUSES: writing a value
 // derived from a reply nobody understood is how you end up transmitting on the
 // wrong antenna.
-func toggleState(r catRig, query string) (int, error) {
+func toggleState(r rig.Rig, query string) (int, error) {
 	reply, err := r.Ask(query)
 	if err != nil {
 		return 0, fmt.Errorf("the radio did not answer %s: %w", query, err)
@@ -115,13 +108,13 @@ func toggleState(r catRig, query string) (int, error) {
 
 // registerCAT adds every rig-control route in the table above.
 func (s *Server) registerCAT(mux routeMux) {
-	r, ok := s.Rig.(catRig)
-	if !ok {
-		// ⚠️ Say so rather than registering routes that answer 200 and do
-		// nothing. A route inventory that matches while the behaviour does not
-		// is a documented failure of this project's own audit.
-		return
-	}
+	// ⚠️ NO TYPE ASSERTION ANY MORE. Send and Ask are part of rig.Rig, so every
+	// radio has them and a model that cannot do raw CAT returns
+	// rig.ErrNotSupported per call - which the handler reports - instead of the
+	// whole control surface silently not existing. A route inventory that
+	// matches while the behaviour does not is a documented failure of this
+	// project's own audit; so is a route that is absent with no explanation.
+	r := s.Rig
 
 	// One verb, no argument.
 	simple := map[string]string{
@@ -578,7 +571,7 @@ func (s *Server) registerCAT(mux routeMux) {
 // uniform - the S-meter is three digits at offset 3 and reading it as four
 // returned a plausible zero for a live band. A short or malformed reply here is
 // an error, never a frequency.
-func readFreq(r catRig, query string) (int64, error) {
+func readFreq(r rig.Rig, query string) (int64, error) {
 	reply, err := r.Ask(query)
 	if err != nil {
 		return 0, fmt.Errorf("the radio did not answer %s: %w", query, err)
@@ -611,12 +604,12 @@ func (s *Server) catPrefix(mux routeMux, prefix string, build catBuilder) {
 func (s *Server) catHandler(prefix string, build catBuilder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		rig, ok := s.Rig.(catRig)
-		if !ok {
-			writeJSON(w, 503, map[string]string{"status": "error",
-				"message": "this host's radio does not accept raw commands"})
-			return
-		}
+		// ⚠️ Send/Ask are on rig.Rig now, so there is nothing to assert. A radio
+		// that cannot do raw CAT answers rig.ErrNotSupported from the call
+		// below, and the operator is told which command was refused and why -
+		// where the old assertion made this route answer 503 for every command
+		// including the ones the radio could have done.
+		rig := s.Rig
 		arg := ""
 		if prefix != "" {
 			arg = strings.TrimPrefix(r.URL.Path, prefix)

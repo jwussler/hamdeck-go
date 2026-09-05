@@ -201,11 +201,9 @@ func (s *Server) registerAdmin(mux routeMux) {
 		s.Lock.Set(true, "locked by "+who)
 		// ⚠️ Turning lockdown on UNKEYS. Locking a transmitter that is currently
 		// keyed and leaving it keyed is not a lockdown, it is a label.
-		if s.Rig2 != nil {
-			_ = s.Rig2.SetPTT(false)
-		}
+		_ = s.Rig.SetPTT(false)
 		writeJSON(w, 200, map[string]any{"status": "ok", "lockdown": true,
-			"reason": s.Lock.Reason(), "unkeyed": s.Rig2 != nil})
+			"reason": s.Lock.Reason(), "unkeyed": true})
 	})
 	mux.routeWho("/api/admin/lockdown/off", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
 		s.Lock.Set(false, "")
@@ -216,12 +214,10 @@ func (s *Server) registerAdmin(mux routeMux) {
 	// stop - it drops PTT at the radio. A stuck client, a crashed one and a
 	// forgotten one all look the same from here, and all three are fixed by this.
 	mux.routeWho("/api/admin/unkey", adminOnly, func(w http.ResponseWriter, r *http.Request, _ string) {
-		if s.Rig2 == nil {
-			writeJSON(w, 503, map[string]any{"status": "error",
-				"message": "this host has no radio to unkey"})
-			return
-		}
-		err := s.Rig2.SetPTT(false)
+		// ⚠️ Every rig can be unkeyed - SetPTT is core, not a capability - so
+		// there is nothing to refuse here. What can still fail is the radio not
+		// accepting it, which is reported below and is a different problem.
+		err := s.Rig.SetPTT(false)
 		if err != nil {
 			writeJSON(w, 502, map[string]any{"status": "error",
 				"message": "the radio did not accept the unkey: " + err.Error()})

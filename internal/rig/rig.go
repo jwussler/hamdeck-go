@@ -9,6 +9,7 @@
 package rig
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -63,13 +64,46 @@ type Snapshot struct {
 	Stale      bool  `json:"stale"`
 }
 
+// ErrNotSupported is how a radio says it cannot do something.
+//
+// ⚠️ IT IS A REFUSAL, NOT A FAKE SUCCESS. The rule this preserves is the one the
+// old asRig2() adapter was written for: "giving the simulator a fake that
+// returns success would let a test pass on a path that cannot exist." Returning
+// this instead keeps that honesty AND lets the route exist and explain itself,
+// where a missing method made the whole route vanish and the caller guess.
+var ErrNotSupported = errors.New("this radio does not support that")
+
 // Rig is any radio. A simulator, a serial port, or a model nobody here owns.
+//
+// ⚠️ THIS INTERFACE IS THE WHOLE CONTRACT NOW. It used to have five methods
+// while *Serial had twenty, so every capability beyond the five was fetched with
+// a RUNTIME TYPE ASSERTION - seven of them across four files, two of which were
+// the same anonymous interface written out twice. That is what forced main.go to
+// carry three separate adapters to narrow one object, one of them existing only
+// to stop a typed nil in an interface taking the host down on the first click of
+// a button the host does not have.
+//
+// A capability a radio lacks returns ErrNotSupported. It does not disappear.
 type Rig interface {
 	Snapshot() Snapshot
 	SetFreq(hz int64) error
 	SetMode(mode string) error
 	SetPTT(on bool) error
 	Describe() string
+
+	// Raw CAT. Every radio here can do both; a model that cannot returns
+	// ErrNotSupported rather than making the rig-control routes vanish.
+	Send(cmd string) error
+	Ask(query string) (string, error)
+
+	// Receiver mute, remembered so unmuting restores the operator's own AF.
+	SetMuted(on bool) error
+
+	// ⚠️ TRANSMIT ROUTING - which input the radio listens to. Only a real serial
+	// rig can do this; the simulator refuses, because a host that says it routed
+	// the microphone when it did not is how an operator finds out on the air.
+	SetRemoteTX(on bool) error
+	RemoteTXState() (rear bool, usb bool, err error)
 }
 
 // Sim is a radio that is not there, and says so in Describe().
@@ -246,3 +280,15 @@ func (s *Sim) Ask(query string) (string, error) {
 var simModeCode = map[string]byte{
 	"LSB": '1', "USB": '2', "CW": '3', "FM": '4', "AM": '5', "DATA": '8',
 }
+
+// ⚠️ THE SIMULATOR REFUSES RATHER THAN PRETENDS. These are the capabilities only
+// a real serial rig has. Returning nil here would let a test - or an operator -
+// believe the microphone had been routed, or the receiver muted, when nothing
+// happened at all. A host that reports a rig it cannot reach is worse than one
+// that refuses, and the same is true of a capability it does not have.
+
+func (s *Sim) SetMuted(on bool) error { return ErrNotSupported }
+
+func (s *Sim) SetRemoteTX(on bool) error { return ErrNotSupported }
+
+func (s *Sim) RemoteTXState() (bool, bool, error) { return false, false, ErrNotSupported }

@@ -10,6 +10,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -61,11 +62,6 @@ type Server struct {
 		Message() string
 		Tune() error
 		Stop()
-	}
-	Rig2 interface {
-		SetRemoteTX(bool) error
-		RemoteTXState() (bool, bool, error)
-		SetPTT(bool) error
 	}
 }
 
@@ -459,16 +455,20 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, 403, map[string]any{"status": "error", "message": why})
 			return
 		}
-		if s.Rig2 == nil {
-			writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
-				"message": "this host has no radio that can be routed for remote transmit"})
-			return
-		}
-		if err := s.Rig2.SetRemoteTX(true); err != nil {
+		// ⚠️ THE RADIO DECIDES, PER CALL. This used to be a nil check on a
+		// separately-adapted interface, so a host with a simulator did not have
+		// the capability at all; now the rig refuses with ErrNotSupported and
+		// the reply keeps the same shape the panel already understands.
+		if err := s.Rig.SetRemoteTX(true); err != nil {
+			if errors.Is(err, rig.ErrNotSupported) {
+				writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
+					"message": "this host has no radio that can be routed for remote transmit"})
+				return
+			}
 			writeJSON(w, 500, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
-		rear, usb, err := s.Rig2.RemoteTXState()
+		rear, usb, err := s.Rig.RemoteTXState()
 		// ⚠️ verified is what the RADIO said, and unverified is not the same as
 		// failed. The C++ host learned that reporting a plausible value here
 		// sends the hunt for a dead transmitter to the wrong end of the chain.
@@ -535,13 +535,16 @@ func (s *Server) Handler() http.Handler {
 	}{{"/api/mute/on", true}, {"/api/mute/off", false}} {
 		m := m
 		mux.route(m.path, session, func(w http.ResponseWriter, r *http.Request) {
-			mr, ok := s.Rig.(interface{ SetMuted(bool) error })
-			if !ok {
-				writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
-					"message": "this host's radio cannot be muted"})
-				return
-			}
-			if err := mr.SetMuted(m.on); err != nil {
+			// ⚠️ A radio that cannot mute answers rig.ErrNotSupported, and the
+			// reply says "available: false" exactly as it used to - but the
+			// decision is now the RADIO's, not a type assertion's, and it is
+			// made per call rather than by whether a method happens to exist.
+			if err := s.Rig.SetMuted(m.on); err != nil {
+				if errors.Is(err, rig.ErrNotSupported) {
+					writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
+						"message": "this host's radio cannot be muted"})
+					return
+				}
 				writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 				return
 			}
@@ -550,14 +553,13 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 	mux.route("/api/mute/toggle", session, func(w http.ResponseWriter, r *http.Request) {
-		mr, ok := s.Rig.(interface{ SetMuted(bool) error })
-		if !ok {
-			writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
-				"message": "this host's radio cannot be muted"})
-			return
-		}
 		want := !s.Rig.Snapshot().Muted
-		if err := mr.SetMuted(want); err != nil {
+		if err := s.Rig.SetMuted(want); err != nil {
+			if errors.Is(err, rig.ErrNotSupported) {
+				writeJSON(w, 200, map[string]any{"status": "ok", "available": false,
+					"message": "this host's radio cannot be muted"})
+				return
+			}
 			writeJSON(w, 400, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
@@ -653,11 +655,11 @@ func (s *Server) Handler() http.Handler {
 	// 404 that also means "wrong URL".
 	mux.route("/api/remote-tx/status", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if s.Rig2 == nil {
+		rear, usb, err := s.Rig.RemoteTXState()
+		if errors.Is(err, rig.ErrNotSupported) {
 			writeJSON(w, 200, map[string]any{"status": "ok", "supported": false})
 			return
 		}
-		rear, usb, err := s.Rig2.RemoteTXState()
 		if err != nil {
 			// ⚠️ Unverified is NOT the same as false. Saying "MIC" when the
 			// read failed would be a confident wrong answer about a
@@ -673,21 +675,24 @@ func (s *Server) Handler() http.Handler {
 
 	mux.route("/api/remote-tx/off", session, func(w http.ResponseWriter, r *http.Request) {
 		cors(w, r)
-		if s.Rig2 == nil {
-			writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
-				"message": "this host has no radio that can be routed for remote transmit"})
-			return
-		}
 		// ⚠️ UNKEY FIRST, THEN HAND THE MICROPHONE BACK. Putting MOD SOURCE back
 		// to MIC while the transmitter is keyed leaves a keyed radio modulated
 		// by whatever is in front of it.
-		_ = s.Rig2.SetPTT(false)
-		if err := s.Rig2.SetRemoteTX(false); err != nil {
+		_ = s.Rig.SetPTT(false)
+		// ⚠️ "Cannot route" and "refused to route back" are different answers.
+		// Folding them together made this reply 502 on a host with a simulator -
+		// an error about a transmitter that was never routed in the first place.
+		if err := s.Rig.SetRemoteTX(false); err != nil {
+			if errors.Is(err, rig.ErrNotSupported) {
+				writeJSON(w, 503, map[string]any{"status": "error", "supported": false,
+					"message": "this host has no radio that can be routed for remote transmit"})
+				return
+			}
 			writeJSON(w, 502, map[string]any{"status": "error",
 				"message": "the radio did not take the routing back: " + err.Error()})
 			return
 		}
-		rear, usb, rerr := s.Rig2.RemoteTXState()
+		rear, usb, rerr := s.Rig.RemoteTXState()
 		writeJSON(w, 200, map[string]any{"status": "ok", "remote_tx": rear && usb,
 			"verified": rerr == nil, "mod_source_rear": rear, "rear_select_usb": usb,
 			"hand_mic_live": !rear})
@@ -777,13 +782,15 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 
-			if s.Rig2 != nil {
-				if err := s.Rig2.SetRemoteTX(true); err != nil {
+			{
+				// ⚠️ A rig that cannot route refuses here and the socket says so,
+				// rather than the transmit path silently not existing.
+				if err := s.Rig.SetRemoteTX(true); err != nil && !errors.Is(err, rig.ErrNotSupported) {
 					conn.Write(r.Context(), websocket.MessageText,
 						[]byte(`{"status":"error","message":"could not route the radio to USB"}`))
 					return
 				}
-				rear, usb, rerr := s.Rig2.RemoteTXState()
+				rear, usb, rerr := s.Rig.RemoteTXState()
 				// ⚠️ What the RADIO answered, not what was sent. "Unverified" is
 				// not the same as "failed", and both are different from "ok".
 				msg := fmt.Sprintf(`{"remote_tx":%t,"verified":%t,"mod_source_rear":%t,"rear_select_usb":%t}`,
@@ -791,10 +798,10 @@ func (s *Server) Handler() http.Handler {
 				conn.Write(r.Context(), websocket.MessageText, []byte(msg))
 			}
 			defer func() {
-				if s.Rig2 != nil {
-					_ = s.Rig2.SetPTT(false) // unkey FIRST
+				{
+					_ = s.Rig.SetPTT(false) // unkey FIRST
 					time.Sleep(50 * time.Millisecond)
-					_ = s.Rig2.SetRemoteTX(false) // then hand the mic back
+					_ = s.Rig.SetRemoteTX(false) // then hand the mic back
 				}
 			}()
 

@@ -282,11 +282,11 @@ func main() {
 	// The proxy is what lets a logger, WSJT-X or contest software keep working
 	// during a remote session instead of needing a virtual serial-port splitter.
 	if *catPort != 0 {
-		cr, ok := r.(catproxy.Rig)
-		if !ok {
-			log.Fatalf("FATAL: --cat-proxy-port needs a radio that accepts raw CAT; this one does not")
-		}
-		cp := catproxy.New(*catPort, cr)
+		// ⚠️ No assertion: every rig.Rig has Ask and Send, so catproxy.Rig is
+		// satisfied by construction. A radio that cannot really do raw CAT
+		// refuses per command with rig.ErrNotSupported, which the proxy relays -
+		// where this used to refuse to START THE WHOLE HOST.
+		cp := catproxy.New(*catPort, r)
 		if err := cp.Start(); err != nil {
 			log.Fatalf("FATAL: %v", err)
 		}
@@ -326,14 +326,14 @@ func main() {
 	ctrl := &http.Server{
 		Addr: fmt.Sprintf("127.0.0.1:%d", *control),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version, Control: true,
-			Audio: stream, Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rec: recorder, Rig2: asRig2(r)}).Handler(),
+			Audio: stream, Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rec: recorder}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	pub := &http.Server{
 		Addr: fmt.Sprintf(":%d", *dash),
 		Handler: (&api.Server{Rig: r, Auth: a, Version: version,
 			PanelDir: *panel, AltPanelDir: *panel2, Audio: stream,
-			Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rec: recorder, Rig2: asRig2(r)}).Handler(),
+			Tx: txSink, TxRec: txRec, Tuner: asTuner(tg), Rec: recorder}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -352,20 +352,6 @@ func main() {
 	}
 }
 
-// asRig2 exposes the transmit-routing methods only when the rig actually has
-// them. ⚠️ The simulator does not, and giving it a fake that returns success
-// would let a test pass on a path that cannot exist.
-func asRig2(r rig.Rig) interface {
-	SetRemoteTX(bool) error
-	RemoteTXState() (bool, bool, error)
-	SetPTT(bool) error
-} {
-	if sr, ok := r.(*rig.Serial); ok {
-		return sr
-	}
-	return nil
-}
-
 // tunerRig is the small slice of the radio the tuner is allowed to touch.
 //
 // ⚠️ DELIBERATELY NARROW. The tuner changes power, mode and PTT and puts them
@@ -378,12 +364,10 @@ func (t tunerRig) Snapshot() (int, string) {
 	return s.PowerW, s.Mode
 }
 
+// ⚠️ No assertion: Send is part of rig.Rig now, and a radio that cannot take a
+// power command refuses with rig.ErrNotSupported, which the tuner reports.
 func (t tunerRig) SetPower(w int) error {
-	c, ok := t.r.(interface{ Send(string) error })
-	if !ok {
-		return fmt.Errorf("this radio does not accept a power command")
-	}
-	return c.Send(fmt.Sprintf("PC%03d;", w))
+	return t.r.Send(fmt.Sprintf("PC%03d;", w))
 }
 
 func (t tunerRig) SetMode(m string) error { return t.r.SetMode(m) }
