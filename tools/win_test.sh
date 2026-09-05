@@ -84,9 +84,13 @@ echo "== install it the way an operator would, but silently"
 $SSH 'powershell -NoProfile -Command "Start-Process -Wait -FilePath C:\Users\'"$VM_USER"'\Setup.exe -ArgumentList \"/VERYSILENT\",\"/SUPPRESSMSGBOXES\",\"/NORESTART\"; exit 0"' \
     && ok "installer returned" || fail "installer did not return cleanly"
 
-echo "== the Microsoft C++ runtime, which a clean Windows does not have"
-# ⚠️ THIS CHECK EXISTS BECAUSE THE APP SHIPPED WITHOUT IT. A Flutter Windows app
-# needs VCRUNTIME140, VCRUNTIME140_1 and MSVCP140. The developer's machine had
+echo "== the MSVC runtime DLLs, which a clean Windows does not have"
+# ⚠️ THIS CHECK EXISTS BECAUSE THE APP SHIPPED WITHOUT IT. These are Microsoft's
+# Visual C++ redistributable DLLs - VCRUNTIME140, VCRUNTIME140_1, MSVCP140 -
+# which EVERY native Windows binary needs, this one included because Flutter
+# compiles to native code. ⚠️ NOTHING TO DO WITH THE C++ HOST NEXT DOOR: that is
+# our own code and is only a reference for this port. Same three letters, two
+# completely different things, and confusing them wastes a conversation. The developer's machine had
 # them from some other program, so it ran there and failed for everybody with a
 # clean install - 0xC0000135, and nothing on screen. Either the system has them
 # or the package brings them; both are fine, neither is not.

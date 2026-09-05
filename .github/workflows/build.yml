@@ -132,9 +132,13 @@ jobs:
           $ver = "${{ github.ref_name }}" -replace '^v',''
           if ($ver -notmatch '^\d+\.\d+\.\d+') { $ver = "0.0.0" }
           $src = "${{ github.workspace }}\client\build\windows\x64\runner\Release"
-          # ⚠️ THE MICROSOFT C++ RUNTIME SHIPS WITH THE APP, and this is not
-          # optional. A Flutter Windows app needs VCRUNTIME140, VCRUNTIME140_1
-          # and MSVCP140; a clean Windows 11 does not have them, so the app
+          # ⚠️ THE MSVC RUNTIME DLLS SHIP WITH THE APP, and this is not
+          # optional. These are Microsoft's Visual C++ redistributable files -
+          # VCRUNTIME140, VCRUNTIME140_1, MSVCP140 - needed by every native
+          # Windows binary, including this one, because Flutter compiles to
+          # native code. ⚠️ They have nothing to do with the C++ HOST in the
+          # sibling repo, which is our own code and only a reference for this
+          # port; the shared "C++" is Microsoft's compiler, not our program. a clean Windows 11 does not have them, so the app
           # fails to start with 0xC0000135 and Windows says nothing an operator
           # can act on. It worked on the developer's own machine because some
           # other program had already installed the runtime - which is exactly
