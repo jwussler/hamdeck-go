@@ -43,17 +43,34 @@ jobs:
       - name: Build
         run: go build -ldflags "-X main.version=${GITHUB_REF_NAME#v}" ./cmd/hamdeck-host
       # ⚠️ RUN IT, not just build it. A host that compiles and exits on start is a
-      # green build and a dead service.
-      - name: It actually starts and serves
+      # green build and a dead service. This step has already earned its keep: it
+      # is what caught the smoke test still calling --hash-password after that
+      # flag was deleted.
+      - name: It actually starts, serves, and can be logged into
         run: |
           set -eux
-          HASH=$(echo "ci-only-password" | ./hamdeck-host --hash-password)
-          HAMDECK_ADMIN_HASH="${HASH#HAMDECK_ADMIN_HASH=}" ./hamdeck-host --port 5199 &
+          STORE="$RUNNER_TEMP/users.json"
+          # ⚠️ THE RECOVERY PATH IS PART OF THE PRODUCT, so CI walks it: create an
+          # account with the same command an operator uses when locked out.
+          echo 'ci-only-password' | ./hamdeck-host --users "$STORE" users set ci
+          ./hamdeck-host --users "$STORE" users list | grep -q '^ci '
+          ./hamdeck-host --users "$STORE" --port 5199 &
           sleep 2
           curl -fsS http://127.0.0.1:5199/api/health | tee /dev/stderr | grep -q '"status":"ok"'
-          # ⚠️ And that the boundary HOLDS: status without a session must be 401.
+          # ⚠️ The boundary HOLDS: status without a session must be 401.
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5199/api/status)
           [ "$code" = "401" ] || { echo "status was $code, expected 401 - the auth boundary is open"; exit 1; }
+          # ⚠️ And the account actually works, because "it started" says nothing
+          # about whether anybody can get in - which is the whole point of a store.
+          curl -fsS -X POST http://127.0.0.1:5199/api/auth/login \
+               -H 'Content-Type: application/json' \
+               -d '{"username":"ci","password":"ci-only-password"}' | grep -q '"token"'
+          # ⚠️ A wrong password must be refused. A login check that only ever
+          # tries the right password cannot tell a credential from a turnstile.
+          bad=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5199/api/auth/login \
+               -H 'Content-Type: application/json' \
+               -d '{"username":"ci","password":"wrong"}')
+          [ "$bad" = "401" ] || { echo "a wrong password answered $bad, expected 401"; exit 1; }
 
   # ⚠️ DESKTOP BUILDS ARE ASKED FOR, NOT AUTOMATIC, AND THE REASON IS THE BILL.
   # This repo is PRIVATE, so its Actions minutes are billable, and macOS runners
