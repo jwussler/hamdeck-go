@@ -1,0 +1,25 @@
+# Device-bound lifecycle for the CONTAINERISED station host.
+#
+# This is the container port of the C++ project's BindsTo=dev-ttyRIG.device
+# drop-in, and it exists because CONTAINERISING DOES NOT REMOVE THE NEED FOR IT.
+# Proven on 09/07/2026 with tools/rig_replug_container.sh: a replug leaves a
+# running container with rig_connected=false forever - it has no reconnect path
+# and cannot rescan. Docker DOES re-resolve --device paths at container START,
+# so a restart is a real fix; something has to fire it, and only the host's
+# udev/systemd knows the radio came back.
+[Unit]
+Description=HamDeck station host (container), bound to the radio
+BindsTo=dev-ttyRIG.device
+After=dev-ttyRIG.device docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# start, not restart: unplug runs ExecStop, so the container is already down.
+ExecStart=/usr/bin/docker start hamdeck-go
+ExecStop=/usr/bin/docker stop hamdeck-go
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

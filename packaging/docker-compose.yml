@@ -1,0 +1,39 @@
+# HamDeck station host as a container. Flags are copied from
+# packaging/hamdeck-go.service, NOT retyped - the box and the repo have drifted
+# once already (the CAT proxy flag was on the box and not in the repo).
+services:
+  hamdeck:
+    image: hamdeck-go:${VERSION:?set VERSION}
+    container_name: hamdeck-go
+    restart: unless-stopped
+    # host networking, deliberately. With a bridge and -p, 5101 (control) and
+    # 4532 (CAT proxy) would be published on every interface; both are
+    # loopback-only binds and that IS the security model. Host networking keeps
+    # 127.0.0.1 meaning 127.0.0.1.
+    network_mode: host
+    devices:
+      # /dev/ttyRIG is the udev symlink for the CP2105's interface 00. Docker
+      # resolves it to ttyUSB0's major:minor at CREATE time and pins that
+      # number for the life of the container - a replug that renumbers the port
+      # leaves this pointing at nothing. Proven, not assumed: run
+      # tools/rig_replug_test.sh against a running container.
+      - /dev/ttyRIG:/dev/ttyRIG
+      - /dev/snd:/dev/snd
+    volumes:
+      # DIRECTORY mounts, never single-file: a single-file bind binds by inode,
+      # and an editor that writes atomically gives a new inode the container
+      # never sees. Cost a night on courierrouter on 08/30.
+      - /etc/hamdeck-go:/etc/hamdeck-go
+      - /var/lib/hamdeck-go:/var/lib/hamdeck-go
+    command:
+      - --radio=/dev/ttyRIG
+      - --radio-baud=38400
+      - --audio=codec
+      - --tgxl=192.168.40.51
+      - --tgxl-port=9010
+      - --record-dir=/var/lib/hamdeck-go/recordings
+      - --replay-seconds=60
+      - --cat-proxy-port=4532
+      - --panel=/opt/hamdeck-go/panel
+      - --port=5102
+      - --control-port=5101

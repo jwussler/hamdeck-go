@@ -1,0 +1,22 @@
+# Keep the build context small: the repo is 630 MB, but the image needs only
+# the Go source and the BUILT web panel (56 MB). Everything below is either a
+# build artifact, a toolchain cache, or another platform's client.
+.git
+dist
+bin
+hamdeck-host
+*.deb
+client/.dart_tool
+client/lib
+client/assets
+client/linux
+client/macos
+client/windows
+client/build/linux
+client/build/flutter_assets
+client/build/native_assets
+client/build/test_cache
+client/build/unit_test_assets
+client/build/web-shoot
+client-wasm
+docs
