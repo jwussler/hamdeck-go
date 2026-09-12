@@ -1,4 +1,8 @@
+<!-- wip-kind: tasks -->
 # HamDeck Go — work in flight  (09/05/2026)
+
+**Code:** `/home/ubuntu/hamdeck-go` on shack · origin `jwussler/hamdeck-go`
+**Updated:** 2026-09-05
 
 ## WHERE THINGS STAND RIGHT NOW
 
