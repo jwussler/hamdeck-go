@@ -52,10 +52,6 @@
   device paths at container START, so a restart genuinely fixes it — but something has to FIRE
   that restart, and only the host's udev and systemd know the radio came back.
   `hamdeck-container.service` is that, same `BindsTo=dev-ttyRIG.device` shape the C++ host used.
-- ⚠️ **This file carries a SECOND `## Standing warnings` block further down** (found
-  09/15/2026). It is an older, shorter copy: 2 of these warnings in earlier wording, and it is
-  missing the `deploy-host.sh` restart one entirely. This block is the current one. Fold them
-  when someone next edits here.
 - ⚠️ **Check the antenna selection before transmitting.** An earlier parity run cycled it, and
   VFO B's stored frequency is not recoverable.
 - The rig is routed REAR/USB while a panel holds it, so the hand mic is dead until the panel
@@ -245,9 +241,3 @@ failures.** It prints now, it does not assert.
 4. Considered: private Forgejo origin + push-mirror to public GitHub, with
    self-hosted runners for Linux/Windows CI (macOS must stay on GitHub — no Mac).
    Separate build, not started.
-
-## Standing warnings
-- ⚠️ **Check the antenna selection before transmitting.** An earlier parity run
-  cycled it, and VFO B's stored frequency is not recoverable.
-- The rig is routed REAR/USB, so the hand mic is dead until the panel
-  disconnects or `remote-tx/off` is sent.
