@@ -2,7 +2,7 @@
 # HamDeck Go — work in flight  (09/05/2026)
 
 **Code:** `/home/ubuntu/hamdeck-go` on shack · origin `jwussler/hamdeck-go`
-**Updated:** 2026-09-05
+**Updated:** 09/15/2026 11:07 CT — reconciled against 53d6a59 (containerised, 09/07)
 
 ## WHERE THINGS STAND RIGHT NOW
 
@@ -16,6 +16,12 @@
   the Actions-minutes problem. `git push` goes to BOTH git.wa0o.com and GitHub.
 - **The panel installed on Joe's desktop.** Audio was dead there because the HOST's capture
   had died; fixed and now self-healing.
+- **The station runs as a CONTAINER on VM 105 as of 09/07** (`53d6a59`). The image builds from
+  source with the version asserted inside it — the same gate `build-deb.sh` runs. `rig_connected`
+  true through radio.wa0o.com. **5101 and 4532 stay loopback-only** because the compose uses host
+  networking rather than a bridge with published ports. Pieces: `packaging/Dockerfile`,
+  `build-image.sh`, `docker-compose.yml`, `hamdeck-container.service`,
+  `tools/rig_replug_container.sh`.
 
 ## NOTHING IS IN FLIGHT — every change is committed and pushed.
 
@@ -36,6 +42,20 @@
    mostly uncovered.
 
 ## Standing warnings
+- ⚠️ **A CONTAINER DOES NOT CARRY ITS DRIVERS.** `cp210x` and `snd-usb-audio` are the HOST
+  kernel's, from `linux-modules-extra`, which `linux-image-virtual` does not pull. That is what
+  took the station off the air for **23 hours on 09/06** — the devices enumerated with no driver
+  bound — and it would do the same to this image on any box. Measured, not argued (`53d6a59`).
+- ⚠️ **`--device` DOES NOT SURVIVE A REPLUG.** `tools/rig_replug_container.sh` unbinds and rebinds
+  both USB devices and FAILED first, exactly as expected: container still running, restart count
+  0, `rig_connected` false forever, serving a dashboard with no radio behind it. Docker re-resolves
+  device paths at container START, so a restart genuinely fixes it — but something has to FIRE
+  that restart, and only the host's udev and systemd know the radio came back.
+  `hamdeck-container.service` is that, same `BindsTo=dev-ttyRIG.device` shape the C++ host used.
+- ⚠️ **This file carries a SECOND `## Standing warnings` block further down** (found
+  09/15/2026). It is an older, shorter copy: 2 of these warnings in earlier wording, and it is
+  missing the `deploy-host.sh` restart one entirely. This block is the current one. Fold them
+  when someone next edits here.
 - ⚠️ **Check the antenna selection before transmitting.** An earlier parity run cycled it, and
   VFO B's stored frequency is not recoverable.
 - The rig is routed REAR/USB while a panel holds it, so the hand mic is dead until the panel
