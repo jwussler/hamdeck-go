@@ -6,6 +6,12 @@
 
 ## WHERE THINGS STAND RIGHT NOW
 
+> **Status 10/06 (live):** the station below is GONE — `qm list` on pve and pve2 has no VM 105,
+> `radio.wa0o.com` has no DNS. `v0.8.0` is a tag with a green CI build (run 09/05 09:55Z) but GitHub
+> has **0 Release objects** for hamdeck-go (`gh api .../releases` → 0); the installers exist only as
+> Actions artifacts (panel-windows/macos/linux/web) that **expire 12/04/2026**.
+
+
 - **The station runs `0.8.0-7-gf422a2b`** (VM 105, 192.168.40.64). Rig connected on
   /dev/ttyRIG, audio in at 23 ms, audio out, CAT proxy on 4532, TG-XL tuner. Auth enforced.
 - **Rollback is one command:** `tools/deploy-host.sh --rollback` (previous binary is kept at
@@ -27,19 +33,24 @@
 
 ## What is NOT done, and is worth doing next
 
-1. **Code signing.** SmartScreen still says "unknown publisher" and it is the biggest
-   adoption blocker. SignPath Foundation is free for OSS — and the repo is public now, which
-   was the eligibility question. See [[hamdeck-code-signing]].
-2. **The macOS .icns carries only 16/32/128/256** — no 512 or 1024, so Finder upscales.
-   Contents.json declares all ten and every source PNG is the right size, so actool is
-   dropping them for some other reason. Cosmetic; no Mac here to test on.
-3. **Audio on real hardware is still the least-tested path.** VM 109 has no sound device, so
-   every Windows drive proved control only — login, PTT, the key reaching the host. Receive
-   and TX audio on Joe's desktop is the first real test. Could add an emulated HDA controller
-   to VM 109 and re-freeze the `clean` snapshot.
-4. **Splitting `main()`** — deliberately skipped as not worth the risk. Aesthetics.
-5. **More `internal/api` tests.** It has policy + transmit + band plan now; 1,900 lines still
-   mostly uncovered.
+- [ ] **Code signing.** SmartScreen still says "unknown publisher" and it is the biggest
+  adoption blocker. SignPath Foundation is free for OSS — and the repo is public now, which
+  was the eligibility question. See [[hamdeck-code-signing]].
+  (still open 10/06: v0.8.0 `HamDeck-Panel-Windows-Setup.exe` artifact → osslsigncode "No signature found"; `gh secret list` on hamdeck-go is empty. hamdeck-cpp's installers ARE signed via Azure Artifact Signing — the same route would apply)
+- [ ] **The macOS .icns carries only 16/32/128/256** — no 512 or 1024, so Finder upscales.
+  Contents.json declares all ten and every source PNG is the right size, so actool is
+  dropping them for some other reason. Cosmetic; no Mac here to test on.
+  (still open 10/06: AppIcon.icns inside the v0.8.0 `HamDeck-Panel-macOS.dmg` artifact parses to ic13 ic11 ic04 ic07 only; no commit to client/macos since 09/05)
+- [ ] **Audio on real hardware is still the least-tested path.** VM 109 has no sound device, so
+  every Windows drive proved control only — login, PTT, the key reaching the host. Receive
+  and TX audio on Joe's desktop is the first real test. Could add an emulated HDA controller
+  to VM 109 and re-freeze the `clean` snapshot.
+  (still open 10/06, BLOCKED: no station host to test against — VM 105 absent from pve/pve2; VM 109 on pve, stopped, `qm config 109` has no audio0, snapshot `clean` 09/05 unchanged)
+- [ ] **Splitting `main()`** — deliberately skipped as not worth the risk. Aesthetics.
+  (still open 10/06: cmd/hamdeck-host/main.go `main()` is 314 lines at HEAD 0526b18)
+- [ ] **More `internal/api` tests.** It has policy + transmit + band plan now; 1,900 lines still
+  mostly uncovered.
+  (still open 10/06: internal/api has only policy_test.go + transmit_test.go; 2,186 lines in the package at HEAD 0526b18)
 
 ## Standing warnings
 - ⚠️ **A CONTAINER DOES NOT CARRY ITS DRIVERS.** `cp210x` and `snd-usb-audio` are the HOST
@@ -175,6 +186,7 @@ the box under test.
 - macOS: `AppIcon.icns` inside the `.dmg` renders as the Yagi.
 - Web: `favicon.png` and the PWA icons are byte-identical to the brand files.
 
+(still open 10/06 — see the checkbox under "What is NOT done": v0.8.0 dmg icns = ic13 ic11 ic04 ic07)
 ⚠️ **Open, minor: the macOS `.icns` carries only 16/32/128/256** (`ic04 ic11 ic07 ic13`) -
 no 512 or 1024 - so Finder upscales at large icon sizes. `Contents.json` declares all ten
 entries and every source PNG is the correct dimension, so `actool` is dropping them for some
@@ -231,13 +243,10 @@ asking the same question the host-side check already answers unambiguously.
 failures.** It prints now, it does not assert.
 
 ## Next
-1. Rebuild, reinstall on the `clean` snapshot, run `tools/win_drive.sh` — prove
-   F13 assigns without crashing and that a press keys the rig.
-2. **Cut the web build to admin-only** (his call: "Admin only, no operating") —
-   accounts, sessions, lockdown, KILL TRANSMIT, read-only status. No operating
-   surface in a browser. NOT STARTED.
-3. Code signing — SmartScreen "unknown publisher" is the biggest adoption
-   blocker. SignPath Foundation is free for OSS.
-4. Considered: private Forgejo origin + push-mirror to public GitHub, with
-   self-hosted runners for Linux/Windows CI (macOS must stay on GitHub — no Mac).
-   Separate build, not started.
+- [ ] Code signing — SmartScreen "unknown publisher" is the biggest adoption
+  blocker. SignPath Foundation is free for OSS.
+  (still open 10/06: v0.8.0 Windows installer artifact unsigned per osslsigncode; no signing secrets on the repo)
+- [ ] Considered: private Forgejo origin + push-mirror to public GitHub, with
+  self-hosted runners for Linux/Windows CI (macOS must stay on GitHub — no Mac).
+  Separate build, not started.
+  (still open 10/06, partly done: origin is Forgejo with a 2nd push URL to GitHub; `forgejo-runner.service` active on the in-house runner box and ran a hamdeck-go task 09/19 (`.forgejo/workflows/checks.yml`, runs-on shack). No Windows self-hosted runner; repo is public, not private)
