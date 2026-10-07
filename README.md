@@ -7,6 +7,9 @@ A ham radio station host and panel: CAT control, a REST API, and a remote panel 
 written, and that stopped being true on 09/04/2026: the Go host holds `/dev/ttyRIG` and the
 USB codec on VM 105, keys the transmitter, drives the TG-XL, and the C++ host is stopped.
 
+(corrected 10/06: no longer true - the station host this ran on was retired 09/23/2026 and no station
+host is running at present. This was the last stack on the air.)
+
 **Only one of them can run.** The radio is single-instance hardware — one process holds the
 serial bridge and the codec — so starting the C++ host while this one is up gets neither of
 them a working radio.
