@@ -2,7 +2,7 @@
 # HamDeck Go — work in flight  (09/05/2026)
 
 **Code:** `/home/ubuntu/hamdeck-go` on shack · origin `jwussler/hamdeck-go`
-**Updated:** 09/15/2026 11:07 CT — reconciled against 53d6a59 (containerised, 09/07)
+**Updated:** 10/06/2026 23:33 CT — 10/06 docs reconciled against live; fixes + open items recorded
 
 ## WHERE THINGS STAND RIGHT NOW
 
