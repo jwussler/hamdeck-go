@@ -2,7 +2,7 @@
 # HamDeck Go — work in flight  (09/05/2026)
 
 **Code:** `/home/ubuntu/hamdeck-go` on shack · origin `jwussler/hamdeck-go`
-**Updated:** 10/06/2026 23:33 CT — 10/06 docs reconciled against live; fixes + open items recorded
+**Updated:** 10/23/2026 10:37 CT — 10/23 10:37 tools/win_sendtext.sh takes PVE_NODE (wks03 VM 128 now on pve3); repo is reference only - live work is hamdeck-rs
 
 ## WHERE THINGS STAND RIGHT NOW
 
