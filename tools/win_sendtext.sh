@@ -44,4 +44,4 @@ done
 # emulated PS/2 keyboard has a buffer and the monitor does not wait for it. So:
 # one connection held open, keys fed down it at 20/sec. Neither slow nor blind.
 { for k in "${keys[@]}"; do echo "sendkey $k"; sleep 0.05; done; } \
-  | ssh pve "qm monitor $VM" >/dev/null 2>&1
+  | ssh "${PVE_NODE:-pve}" "qm monitor $VM" >/dev/null 2>&1
